@@ -43,7 +43,9 @@ CHECKS = {
     'hand': 'import torch,pyrender,trimesh;print("trimesh",trimesh.__version__)',
     'htd': 'import torch,timm;print("timm",timm.__version__)',
     'exmr': 'import torch,torchvision,numpy;print("torch",torch.__version__,"cuda",torch.cuda.is_available())',
+    'face': 'import mediapipe,cv2,numpy;from mediapipe.tasks.python import vision;print("mediapipe",mediapipe.__version__,"opencv",cv2.__version__)',
 }
+FACE_FOLDER, FACE_PYTHON, FACE_REQUIREMENTS = '.venv-face', '3.12.10', 'installer/face-requirements-linux.txt'
 
 
 def sha256(path):
@@ -166,6 +168,20 @@ def verify(key, python, group):
     say(f'READY {key}: {check.stdout.strip()}')
 
 
+def build_face(uv):
+    """Separate MediaPipe runtime for face capture (mocap/face_runtime.py); no torch."""
+    folder = ROOT / FACE_FOLDER
+    python = folder / 'bin/python'
+    if not python.is_file():
+        run(uv, 'venv', folder, '--python', FACE_PYTHON, '--no-project')
+    say('Installing face: hash-pinned MediaPipe runtime')
+    run(uv, 'pip', 'install', '--python', python, '--no-deps', '--require-hashes', '-r', ROOT / FACE_REQUIREMENTS)
+    check = subprocess.run([str(python), '-c', CHECKS['face']], capture_output=True, text=True)
+    if check.returncode:
+        raise SystemExit('face: import check failed:\n' + check.stderr[-2000:])
+    say(f'READY face: {check.stdout.strip()}')
+
+
 def build_correction():
     """Compile the Kimodo motion-correction extension for the shared Python 3.10 runtime."""
     python = ROOT / '.venv/bin/python'
@@ -227,7 +243,7 @@ def check_ffmpeg():
 
 def main():
     parser = argparse.ArgumentParser(description='Prepare pinned RGB MoCap runtimes on Linux.')
-    parser.add_argument('--profiles', nargs='+', choices=list(FOLDERS), default=['shared', 'gui'],
+    parser.add_argument('--profiles', nargs='+', choices=[*FOLDERS, 'face'], default=['shared', 'gui'],
                         help='Runtimes to build (overlays add shared automatically).')
     parser.add_argument('--correction', action='store_true', help='Build the native motion-correction module.')
     parser.add_argument('--blender', action='store_true', help='Install the pinned Blender 4.5 for characters.')
@@ -237,16 +253,20 @@ def main():
         raise SystemExit('This setup supports Linux x86_64 only; use install.cmd on Windows.')
     lock = load_lock()
     groups = {g['key']: g for g in lock['groups']}
-    profiles = args.profiles
+    face = 'face' in args.profiles
+    profiles = [k for k in args.profiles if k != 'face']
     wanted = list(dict.fromkeys((['shared'] if any(groups[k].get('base') == 'shared' for k in profiles) else [])
                                 + profiles))
     uv = ensure_uv(lock)
-    pythons = sorted({groups[k]['python'] for k in wanted})
+    pythons = sorted({groups[k]['python'] for k in wanted} | ({FACE_PYTHON} if face else set()))
     run(uv, 'python', 'install', *pythons)
     if wanted:
         bundled = bundled_wheels()
     for key in wanted:
         build_profile(uv, groups[key], bundled)
+    if face:
+        build_face(uv)
+        wanted.append('face')
     check_ffmpeg()
     if args.correction:
         build_correction()

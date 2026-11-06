@@ -26,7 +26,7 @@ from .timeline import TimelineSlider
 from .preview_data import PreviewDataLoader, project_signature
 from .motion_tools import MOTION_TOOLS, selected_export, RESULTS, result_kind, result_options, result_is_current, base_result, body_result, has_handflow
 
-STAGES = {"prepare": "Prepare Video", "track": "Track Actor", "pva": "Analyze 2D", "gvhmr": "Initial 3D Reconstruction", "refine": "Refine Motion", "export": "Export", "download": "Model Manager", "diagnose": "Check System"}
+STAGES = {"prepare": "Prepare Video", "track": "Track Actor", "pva": "Analyze 2D", "gvhmr": "Initial 3D Reconstruction", "refine": "Refine Motion", "export": "Export", "download": "Model Manager", "diagnose": "Check System", "face": "Capture Face"}
 
 from .theme import STYLE
 STAGES["mesh"] = "Prepare SMPL-X Mesh"
@@ -132,7 +132,7 @@ class ModelsDialog(QDialog):
         self.tool = MOTION_TOOLS[tool_key or window.model_choice.currentData()]
         from .models import STAGE_REQUIREMENTS
         keys = ({key for key in STAGE_REQUIREMENTS[self.tool.key+'_assets']} if self.tool.key in ('mamma','prompthmr','pear') else
-                {key for stage in (*self.tool.stages(refine=True, footmr=True, handflow=True),'people') for key in STAGE_REQUIREMENTS.get(stage, ())})
+                {key for stage in (*self.tool.stages(refine=True, footmr=True, handflow=True),'people','face') for key in STAGE_REQUIREMENTS.get(stage, ())})
         if self.tool.key=='pear':keys.update(STAGE_REQUIREMENTS['pear_align'])
         if self.tool.key=='prompthmr':keys.update(STAGE_REQUIREMENTS['prompthmr_camera_assets'])
         if self.tool.key=='flowhmr':
@@ -207,7 +207,8 @@ class ModelsDialog(QDialog):
     def refresh(self):
         from .models import STAGE_REQUIREMENTS
         for i, model in enumerate(self.models):
-            name = model.name + (" (Optional: HTD / 2D)" if self.tool.key == "gvhmr" and model.key == "pva" else "")
+            name = model.name + (" (Optional: HTD / 2D)" if self.tool.key == "gvhmr" and model.key == "pva" else
+                                 " (Optional: Face)" if model.key == "face_landmarker" else "")
             if self.tool.key=='pear' and model.key in STAGE_REQUIREMENTS['pear_align']:name+=' (Optional: Camera Align)'
             available = ready(model)
             for column, text in ((0, name), (1, "Ready" if available else "Missing")):
@@ -1066,7 +1067,11 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         correction=self.motion_correction.isChecked()
         if correction:self.save_correction_options()
         hand=tool.key=='gvhmr' and self.handflow_refine.isChecked()
-        self.input_jobs(tool.stages(refine, foot,correction,handflow=hand), result=result_kind(refine, foot,correction,handflow=hand))
+        stages=list(tool.stages(refine, foot,correction,handflow=hand))
+        if getattr(self,'face_capture',None) is not None and os.name!='nt' and self.face_capture.isChecked():
+            # Face capture follows motion inference and precedes correction/export of the same project.
+            stages.insert(next((i for i,s in enumerate(stages) if s in ('correct','export','flow_export')),len(stages)),'face')
+        self.input_jobs(stages, result=result_kind(refine, foot,correction,handflow=hand))
 
     def save_correction_options(self):
         if self.project is not None:

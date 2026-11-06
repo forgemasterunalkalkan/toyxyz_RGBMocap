@@ -66,7 +66,7 @@ Use this when the machine with the screen is not the machine with the GPU.
 ### How it works
 
 Stages that run models (`track`, `people`, `person`, ExMR, FlowHMR and GVHMR
-stages and their batches; see `REMOTE_STAGES` in `mocap/remote_workers.py`)
+stages and their batches, and face capture; see `REMOTE_STAGES` in `mocap/remote_workers.py`)
 start a local proxy instead of the worker. For each job the proxy:
 
 1. copies the source code and `models/` to the host, at the **same absolute
@@ -117,7 +117,8 @@ worker and everything it started. One job runs on the host at a time.
    .venv-gui/bin/python -m mocap.remote_workers --setup shared exmr
    ```
 
-`--setup` takes the same profiles as `install.sh`. Models stay managed
+`--setup` takes the same profiles as `install.sh`, plus `face` for
+[face capture](FACE.md). Models stay managed
 locally: import or download them in Model Manager here; the first job that
 needs them uploads them to the host (the Console shows the upload progress).
 

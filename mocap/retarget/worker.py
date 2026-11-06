@@ -18,6 +18,15 @@ def invoke(mode,out,*args):
         p.stdout.close()
         if p.wait():raise RuntimeError('Character processing failed:\n'+''.join(tail)[-2500:])
 
+def unity_face_hints(source,out):
+    """Jaw/eye bones named by a Unity Humanoid avatar next to the FBX (its .meta), as face-mapping hints."""
+    import re
+    try:text=Path(str(source)+'.meta').read_text(encoding='utf-8',errors='ignore')
+    except OSError:return
+    human={h.strip():b.strip() for b,h in re.findall(r'- boneName: (.+?)\n\s+humanName: (.+?)\n',text)}
+    hints={k:human[k] for k in ('Jaw','LeftEye','RightEye') if k in human}
+    if hints:atomic_json(out/'unity-avatar.json',hints)
+
 def main(args):
     # Packaged workers run with -I, which ignores PYTHONIOENCODING/PYTHONUTF8.
     # QProcess decodes these pipes as UTF-8, regardless of the Windows locale.
@@ -35,6 +44,7 @@ def main(args):
         result=dict(characters=rows)
     elif job['mode']=='import':
         invoke('import',out,job['file'])
+        unity_face_hints(Path(job['file']),out)
         result=json.loads((out/'import.json').read_text(encoding='utf8'))
     elif job['mode']=='export':
         for i,(take,target) in enumerate(zip(job['takes'],job['files'])):
@@ -52,7 +62,10 @@ def main(args):
             report(f'Take {i+1}/{len(job["takes"])}: preparing selected source')
             for name in [f'{kind}-rest.blend',f'{kind}-rig.json',f'{kind}-canonical.npz',f'{kind}-contact-geometry.npz','import.json']:
                 shutil.copy2(asset/name,folder/name)
+            if (asset/'unity-avatar.json').is_file():shutil.copy2(asset/'unity-avatar.json',folder/'unity-avatar.json')
             receipt=prepare(Path(take['project']),job['result'],folder)
+            face=Path(take['project'])/'face.npz'
+            if face.is_file():shutil.copy2(face,folder/'face.npz')  # Keyed onto the character after the body bake.
             report(f'Take {i+1}/{len(job["takes"])}: solving contact retargeting')
             diagnostic=run(folder,kind)
             report(f'Take {i+1}/{len(job["takes"])}: baking body bones')

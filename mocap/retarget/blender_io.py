@@ -167,11 +167,24 @@ def preview(out,arm,keyed,n):
         while b is not None and b.name not in index:b=b.parent
         owner[bone.name]=index[b.name] if b else len(palette)
     vertices=[];colors=[];faces=[];rows=[];influences=[];offset=0
+    shapes=[];morphs=[]  # Animated shape keys (face capture): sparse offsets for the viewport.
     for obj in bpy.context.scene.objects:
         if obj.type!='MESH':continue
         mesh=obj.data;mesh.calc_loop_triangles();M=np.array(obj.matrix_world)
         v=np.empty(len(mesh.vertices)*3);mesh.vertices.foreach_get('co',v);v=v.reshape(-1,3)
         vertices.append((v@M[:3,:3].T+M[:3,3])@A);colors.append(vertex_colors(obj))
+        keys=mesh.shape_keys
+        if keys is not None and keys.use_relative and keys.animation_data and keys.animation_data.action:
+            from .blender_bake import curves
+            animated={c.data_path for c in curves(keys.animation_data.action)}
+            for block in keys.key_blocks[1:]:
+                if block.path_from_id('value') not in animated:continue
+                co=np.empty(len(mesh.vertices)*3);block.data.foreach_get('co',co)
+                base=np.empty(len(mesh.vertices)*3);block.relative_key.data.foreach_get('co',base)
+                delta=((co-base).reshape(-1,3)@M[:3,:3].T)@A
+                moved=np.flatnonzero(np.abs(delta).max(1)>1e-6)
+                if len(moved):
+                    morphs.append((len(shapes),offset+moved,delta[moved]));shapes.append(block)
         faces.extend([[offset+i for i in t.vertices] for t in mesh.loop_triangles]);offset+=len(v)
         for vertex in mesh.vertices:
             weights={}
@@ -185,15 +198,26 @@ def preview(out,arm,keyed,n):
     from mocap.mesh_data import adjacency
     vertices=np.concatenate(vertices).astype('float32');faces=np.asarray(faces,np.uint32)
     offsets,neighbors=adjacency(faces,len(vertices))
-    np.savez(io_path(out/'preview.npz'),vertices=vertices,colors=np.concatenate(colors),faces=faces,weights=np.asarray(influences,np.float32),rows=np.asarray(rows,np.uint32),offsets=offsets,neighbors=neighbors)
-    frames=np.lib.format.open_memmap(io_path(out/'preview-frames.npy'),mode='w+',dtype='float32',shape=(n,len(palette)+1,4,4))
+    extra={}
+    blocks=(len(shapes)+15)//16  # Per-frame shape weights ride after the bone palette, 16 per 4x4 block.
+    if shapes:
+        ids=np.concatenate([m[1] for m in morphs]);entries=np.column_stack((np.concatenate([np.full(len(m[1]),m[0]) for m in morphs]),
+            np.concatenate([m[2] for m in morphs]))).astype(np.float32)
+        order=np.argsort(ids,kind='stable');ids=ids[order];entries=entries[order]
+        counts=np.bincount(ids,minlength=len(vertices));starts=np.concatenate(([0],np.cumsum(counts)[:-1]))
+        extra=dict(morph=entries,morph_rows=np.column_stack((starts,counts)).astype(np.uint32),morph_block=np.int32(len(palette)+1))
+    np.savez(io_path(out/'preview.npz'),vertices=vertices,colors=np.concatenate(colors),faces=faces,weights=np.asarray(influences,np.float32),rows=np.asarray(rows,np.uint32),offsets=offsets,neighbors=neighbors,**extra)
+    frames=np.lib.format.open_memmap(io_path(out/'preview-frames.npy'),mode='w+',dtype='float32',shape=(n,len(palette)+1+blocks,4,4))
     C=np.eye(4);C[:3,:3]=A.T
     rest_inv={name:(arm.matrix_world@arm.data.bones[name].matrix_local).inverted() for name in palette}
     for i in range(n):
         bpy.context.scene.frame_set(i+1);bpy.context.view_layer.update()
         for j,name in enumerate(palette):
             frames[i,j]=C@np.array(arm.matrix_world@arm.pose.bones[name].matrix@rest_inv[name])@C.T
-        frames[i,-1]=np.eye(4)
+        frames[i,len(palette)]=np.eye(4)
+        if shapes:
+            values=np.zeros(blocks*16,np.float32);values[:len(shapes)]=[block.value for block in shapes]
+            frames[i,len(palette)+1:]=values.reshape(blocks,4,4)
         if i%30==0:report(f'Preparing animation preview {i+1}/{n}')
     frames.flush();del frames
 
@@ -212,8 +236,16 @@ def main(args):
         blender_bake.OUT=out
         arm,keyed=blender_bake.bake(rest[0],'motion','stance')
         n=bpy.context.scene.frame_end
+        from .blender_face import apply_face
+        face_bones,face=apply_face(out,arm,n)
+        if face:
+            keyed=sorted(set(keyed)|set(face_bones))
+            report(f"Face: {face['shape_keys']} shape keys, {len(face['bone_channels'])} bone channels")
+            from .file_paths import save_blend
+            bpy.context.scene.frame_set(1)
+            save_blend(out/'animation.blend')
         preview(out,arm,keyed,n)
-        Path(io_path(out/'bake.json')).write_text(json.dumps(dict(keyed_bones=keyed,frames=n,object_animation_channels=0)),encoding='utf8')
+        Path(io_path(out/'bake.json')).write_text(json.dumps(dict(keyed_bones=keyed,frames=n,object_animation_channels=0,face=face)),encoding='utf8')
     elif mode=='export':
         from .selective_fbx import body_only_sampler,body_dependencies
         from mathutils import Matrix

@@ -448,6 +448,14 @@ def build_workspace(w):
     settings.setContentsMargins(0, 0, 0, 0)
     settings.setSpacing(10)
     settings.setAlignment(Qt.AlignTop)
+    face=group('Face',settings)
+    w.face_capture=QCheckBox('Capture Face (eyes and mouth)')
+    w.face_capture.setChecked(False)
+    w.face_capture.setToolTip(tooltip_text('Read blinks, gaze and mouth shapes from the video when you run Reconstruct 3D. '
+        'Retargeted characters with ARKit face shapes or jaw/eye bones receive this face animation in their export. '
+        'Needs the face visible to the camera; the body motion is unaffected either way.'))
+    face.addWidget(w.face_capture)
+    face.parentWidget().setVisible(__import__('os').name!='nt')
     correction=group('Motion Correction',settings)
     w.correction_group=correction.parentWidget()
     w.motion_correction=QCheckBox('Enable Correction')

@@ -10,10 +10,19 @@ layout(std430,binding=0) readonly buffer Model { float model[]; };
 struct Vertex { vec4 position; vec4 normal; };
 layout(std430,binding=1) buffer Output { Vertex vertices[]; };
 layout(std430,binding=4) readonly buffer Frame { float pose[]; };
+layout(std430,binding=5) readonly buffer Morph { float morph[]; };
 uniform int vertexCount;
+uniform int morphOffset;
 void main(){
  uint i=gl_GlobalInvocationID.x;if(i>=uint(vertexCount))return;
- vec4 v=vec4(model[3*i],model[3*i+1],model[3*i+2],1);
+ vec3 base=vec3(model[3*i],model[3*i+1],model[3*i+2]);
+ // Face shapes: sparse per-vertex offsets weighted by this frame's shape values.
+ if(morphOffset>=0){
+  int s=int(morph[2*i]);int m=int(morph[2*i+1]);
+  for(int k=0;k<m;k++){int o=2*vertexCount+4*(s+k);
+   base+=pose[morphOffset+int(morph[o])]*vec3(morph[o+1],morph[o+2],morph[o+3]);}
+ }
+ vec4 v=vec4(base,1);
  int r=3*vertexCount+2*int(i);int a=int(model[r]);int n=int(model[r+1]);
  vec3 p=vec3(0);
  for(int k=0;k<n;k++){
@@ -63,6 +72,14 @@ class CharacterRenderer(MeshRenderer):
         self.vertices=self.buffer(self.vertex_count*32)
         self.offsets=self.buffer(asset['offsets']);self.neighbors=self.buffer(asset['neighbors'])
         self.frame=self.buffer(palette*16*4)
+        # Face shapes (captured face, see mocap/retarget/blender_face.py); absent in older previews.
+        morph=asset.get('morph')
+        if morph is not None and len(morph):
+            self.morph=self.buffer(np.concatenate([asset['morph_rows'].ravel(),morph.ravel()]).astype('float32'))
+            self.morph_offset=16*int(asset['morph_block'])
+        else:
+            self.morph=self.buffer(np.zeros(4,np.float32));self.morph_offset=-1
+        self.skin.bind();self.gl.glUniform1i(self.skin.uniformLocation('morphOffset'),self.morph_offset);self.skin.release()
         self.indices=self.buffer(asset['faces'],QOpenGLBuffer.IndexBuffer);self.indices.bind()
         self.surface.bind();self.vertices.bind()
         for i,offset in [(0,0),(1,16)]:
@@ -95,6 +112,11 @@ class CharacterRenderer(MeshRenderer):
             self.release_buffers();raise
         self.asset_key=asset['key'];self.frame_key=None
         self.check('character load')
+
+    def deform(self,frame,key):
+        if key==self.frame_key:return
+        self.gl.glBindBufferBase(0x90D2,5,self.morph.bufferId())
+        super().deform(frame,key)
 
     def draw(self,eye,basis,width,height,color=(.71,.71,.71),transform=None,clear_depth=True):
         if not self.batches:

@@ -96,6 +96,11 @@ MODELS_LIST.extend([
     Model('exmr_sapiens','Body / Hand / Foot Keypoints / Sapiens2 1B','exmr/sapiens2_1b_pose.safetensors','https://huggingface.co/facebook/sapiens2-pose-1b',minimum_bytes=6079194752,
           download_url='https://huggingface.co/facebook/sapiens2-pose-1b/resolve/f5fed8b97b99698d5eea1d14ff0855d0b4c3f000/sapiens2_1b_pose.safetensors',
           expected_sha256='2dab7014a17e99e460c18817325a71dd7a81ce48d87027f01c2ee7d7b3af969f'),
+    # Optional face capture (mocap/face_capture.py). Apache-2.0, versioned model path.
+    Model('face_landmarker','Face / MediaPipe Face Landmarker','face/face_landmarker.task',
+          'https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker',minimum_bytes=3_000_000,
+          download_url='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+          expected_sha256='64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff'),
 ])
 from .mamma_models import ASSETS as MAMMA_ASSETS, KEYS as MAMMA_KEYS, INSTRUCTIONS as MAMMA_INSTRUCTIONS
 MODELS_LIST.extend(Model(**entry) for entry in MAMMA_ASSETS)
@@ -245,6 +250,7 @@ STAGE_REQUIREMENTS = {
     'exmr_preprocess': ('exmr_sapiens',),
     'exmr_features': ('flow_sam','flow_sam_config','flow_mhr','hand_hamer','hand_mean','mano_right'),
     'exmr': ('exmr','exmr_config','smplx'),
+    'face': ('face_landmarker',),
     'mamma_assets': MAMMA_KEYS,
     **{stage:PHMR_KEYS for stage in ('prompthmr_assets','prompthmr_prepare','prompthmr_track','prompthmr_pose','prompthmr_world','prompthmr_publish')},
     'mamma_prepare': MAMMA_KEYS,

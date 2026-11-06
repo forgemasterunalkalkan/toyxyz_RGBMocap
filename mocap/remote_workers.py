@@ -47,6 +47,7 @@ REMOTE_STAGES = frozenset({
     'flow_camera', 'flow_features', 'flowhmr',
     'exmr_preprocess', 'exmr_features', 'exmr',
     'flow_batch', 'exmr_batch', 'gvhmr_batch',
+    'face',
 })
 # Worker-only caches inside a project, rebuilt on the host from input.mp4.
 HOST_ONLY = frozenset({'exmr_frames'})
@@ -78,6 +79,9 @@ def remote_stages(config) -> frozenset:
 
 
 def local_command(root, stage, args, check=True) -> list[str]:
+    from . import face_runtime
+    if stage in face_runtime.STAGES:
+        return face_runtime.command(root, stage, args, check=check)
     key = profile_for(stage, args)
     python = Path(root) / PROFILES[key]['dev'] / 'bin/python'
     if check and not python.is_file():
