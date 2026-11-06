@@ -6,9 +6,12 @@ tools/setup_linux.py from installer/runtime-lock-linux.json.
 With a remote host configured, every stage in REMOTE_STAGES starts this module
 as a proxy instead of the worker. The proxy:
 
-1. mirrors the source code and ``models/`` to the *same absolute paths* on the
-   host, so commands, receipts, cache identities and @@MOCAP@@ events need no
-   path translation;
+1. mirrors the source code and ``models/`` to the host. The worker there sees the
+   mirror at the *same absolute path* as this checkout, so commands, receipts,
+   cache identities and @@MOCAP@@ events need no path translation. By default the
+   mirror is stored at that path; with ``"root"`` it is stored elsewhere and the
+   worker runs in a private mount namespace that shows it at this checkout's path
+   (mocap/path_view.py), so several clients can share one mirror;
 2. reconciles the job's project folders with the host against the state of the
    last sync - changes on either side are copied, deletions are propagated and,
    when both sides changed a file, the newer one wins - so outputs of a
@@ -21,10 +24,10 @@ as a proxy instead of the worker. The proxy:
 Everything else (GUI, video import, contact correction, Blender, export) stays
 local. Configure with ``config/local.json``::
 
-    {"remote_workers": {"host": "workstation"}}
+    {"remote_workers": {"host": "workstation", "root": "/home/me/rgbmocap"}}
 
-or ``RGB_MOCAP_REMOTE=<ssh host>`` (``off`` disables). The host needs the same
-absolute path as this checkout; prepare it with
+or ``RGB_MOCAP_REMOTE=<ssh host>`` (``off`` disables). Without ``root`` the host
+needs the same absolute path as this checkout. Prepare it with
 ``python3 -m mocap.remote_workers --init``.
 """
 from __future__ import annotations
@@ -39,6 +42,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import path_view
 from .paths import HOME, ROOT
 from .runtime_registry import PROFILES, profile_for
 
@@ -107,15 +111,26 @@ def say(message):
 
 
 class Link:
-    """One multiplexed SSH connection; every ssh/rsync call reuses it."""
+    """One multiplexed SSH connection; every ssh/rsync call reuses it.
 
-    def __init__(self, host):
+    ``root`` is where the mirror is stored on the host (default: this checkout's path).
+    """
+
+    def __init__(self, host, root=None):
         self.host = host
+        if root is not None and not (isinstance(root, str) and root.startswith('/')):
+            raise RemoteError('remote_workers.root must be an absolute path on the host.')
+        self.root = Path(os.path.normpath(root)) if root else ROOT
         runtime = os.environ.get('XDG_RUNTIME_DIR') or tempfile.gettempdir()
         self.control = str(Path(runtime) / 'rgbmocap-ssh-%C')
         self.options = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                         '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4',
                         '-o', 'ControlPath=' + self.control]
+        if os.environ.get(path_view.ENV, '{}') != '{}':
+            # Inside a path view root-owned files appear owned by "nobody", and ssh rejects the
+            # system configuration's Include files for that. Read only the user's own config.
+            user = Path.home() / '.ssh/config'
+            self.options = ['-F', str(user) if user.is_file() else '/dev/null', *self.options]
 
     def open(self):
         # Start (or reuse) a background master with its stdio detached, so it never
@@ -135,6 +150,21 @@ class Link:
             detail = message.strip().splitlines()[-1:] or ['no response']
             raise RemoteError(f'Cannot connect to {self.host}: {detail[0]}. '
                               'Check that ssh-agent holds your key (ssh-add).')
+
+    @property
+    def view(self):
+        """Path view for the remote worker: this checkout's path shows the stored mirror."""
+        return {str(ROOT): str(self.root)} if self.root != ROOT else None
+
+    def path(self, local) -> Path:
+        """Where a path of this checkout is stored on the host (other paths are unchanged)."""
+        local = Path(local)
+        if self.root != ROOT and local.is_relative_to(ROOT):
+            return self.root / local.relative_to(ROOT)
+        return local
+
+    def remote(self, local) -> str:
+        return f'{self.host}:{self.path(local)}'
 
     def ssh(self, *remote, **kwargs):
         return ['ssh', *self.options, '-o', 'ControlMaster=no', '-T', self.host, *remote]
@@ -198,13 +228,14 @@ def state_file(name) -> Path:
 def push_code(link):
     """Tracked and new source files; files removed locally since the last push are removed remotely."""
     files = code_files()
-    previous_path = state_file(hashlib.sha1(link.host.encode()).hexdigest()[:16] + '-code.json')
+    key = link.host if link.root == ROOT else f'{link.host}\0{link.root}'
+    previous_path = state_file(hashlib.sha1(key.encode()).hexdigest()[:16] + '-code.json')
     try:
         previous = set(json.loads(previous_path.read_text(encoding='utf-8')))
     except (OSError, ValueError):
         previous = set()
     removed = sorted(previous - set(files))
-    link.rsync('--files-from=-', '--delete-missing-args', str(ROOT) + '/', f'{link.host}:{ROOT}/',
+    link.rsync('--files-from=-', '--delete-missing-args', str(ROOT) + '/', link.remote(ROOT) + '/',
                names=files + removed, what='Code')
     previous_path.write_text(json.dumps(files), encoding='utf-8')
 
@@ -214,13 +245,13 @@ def push_models(link):
     if not models.is_dir():
         return
     plan = link.rsync('--dry-run', '--out-format=%l %n', '--exclude=*.part', '--exclude=*.partial',
-                      str(models) + '/', f'{link.host}:{models}/')
+                      str(models) + '/', link.remote(models) + '/')
     sizes = [int(line.split(' ', 1)[0]) for line in plan.splitlines() if line and not line.endswith('/')
              and line.split(' ', 1)[0].isdigit()]
     if not sizes:
         return
     say(f'Uploading {len(sizes)} model file(s), {sum(sizes) / 2**30:.2f} GiB, to {link.host}...')
-    link.rsync('--exclude=*.part', '--exclude=*.partial', str(models) + '/', f'{link.host}:{models}/',
+    link.rsync('--exclude=*.part', '--exclude=*.partial', str(models) + '/', link.remote(models) + '/',
                progress='Uploading models')
 
 
@@ -261,8 +292,9 @@ print(json.dumps(out))
 
 
 def remote_scan(link, folders) -> dict:
-    out = link.run('python3 -c ' + shlex.quote(REMOTE_SCAN), json.dumps(sorted(HOST_ONLY)), *map(str, folders))
-    return {Path(k): (v or {}) for k, v in json.loads(out).items()}
+    stored = {str(link.path(folder)): Path(folder) for folder in folders}
+    out = link.run('python3 -c ' + shlex.quote(REMOTE_SCAN), json.dumps(sorted(HOST_ONLY)), *stored)
+    return {stored[k]: (v or {}) for k, v in json.loads(out).items()}
 
 
 def plan_sync(local, remote, base):
@@ -296,7 +328,7 @@ def sync_folders(link, folders):
     if not folders:
         return
     remote = remote_scan(link, folders)
-    wait = f'flock -w 300 {shlex.quote(str(LOCK))} rsync'
+    wait = f'flock -w 300 {shlex.quote(str(link.path(LOCK)))} rsync'
     for folder in folders:
         record = state_file(hashlib.sha1(f'{link.host}\0{folder}'.encode()).hexdigest() + '.json')
         try:
@@ -306,8 +338,8 @@ def sync_folders(link, folders):
         push, pull, conflicts, merged = plan_sync(scan(folder), remote.get(folder, {}), base)
         for rel in conflicts:
             say(f'Remote sync: {folder.name}/{rel} changed on both machines; kept the newer copy.')
-        for names, source, target in ((push, f'{folder}/', f'{link.host}:{folder}/'),
-                                      (pull, f'{link.host}:{folder}/', f'{folder}/')):
+        for names, source, target in ((push, f'{folder}/', link.remote(folder) + '/'),
+                                      (pull, link.remote(folder) + '/', f'{folder}/')):
             if not names:
                 continue
             link.rsync('--rsync-path', wait, '--files-from=-', '--delete-missing-args', source, target,
@@ -360,7 +392,8 @@ def job_paths(args):
 # ---------------------------------------------------------------- proxy
 
 def remote_env():
-    env = {k: v for k, v in os.environ.items() if k.startswith('RGB_MOCAP_') and k != 'RGB_MOCAP_REMOTE'}
+    env = {k: v for k, v in os.environ.items()
+           if k.startswith('RGB_MOCAP_') and k not in ('RGB_MOCAP_REMOTE', path_view.ENV)}
     env.update({k: os.environ[k] for k in FORWARD_ENV if k in os.environ})
     env['RGB_MOCAP_DATA'] = str(HOME)
     env['RGB_MOCAP_REMOTE'] = 'off'  # A remote worker never proxies again.
@@ -368,15 +401,20 @@ def remote_env():
 
 
 def check_mirror(link, python):
-    status = link.run('test -f ' + shlex.quote(str(ROOT / MARKER)) + ' && echo mirror; '
-                      'test -x ' + shlex.quote(str(python)) + ' && echo runtime; '
-                      'mkdir -p ' + shlex.quote(str(LOCK.parent)) + '; true')
+    # The interpreter is a symlink that may resolve only inside the worker's path view.
+    stored = shlex.quote(str(link.path(python)))
+    status = link.run('test -f ' + shlex.quote(str(link.path(ROOT / MARKER))) + ' && echo mirror; '
+                      f'{{ test -L {stored} || test -x {stored}; }} && echo runtime; '
+                      + ('command -v bwrap >/dev/null && echo bwrap; ' if link.view else '')
+                      + 'mkdir -p ' + shlex.quote(str(link.path(LOCK.parent))) + '; true')
     if 'mirror' not in status:
-        raise RemoteError(f'{link.host} has no RGB MoCap mirror at {ROOT}. '
+        raise RemoteError(f'{link.host} has no RGB MoCap mirror at {link.path(ROOT)}. '
                           'Run: python3 -m mocap.remote_workers --init')
     if 'runtime' not in status:
         raise RemoteError(f'{link.host} lacks the runtime {python.parent.parent.name}. '
                           'Run: python3 -m mocap.remote_workers --setup')
+    if link.view and 'bwrap' not in status:
+        raise RemoteError(f'{link.host} needs bubblewrap to run workers from {link.root}. ' + path_view.INSTALL)
 
 
 def proxy(stage, args) -> int:
@@ -385,7 +423,7 @@ def proxy(stage, args) -> int:
     if not host:
         raise RemoteError('No remote host configured.')
     worker = local_command(ROOT, stage, args, check=False)
-    link = Link(host)
+    link = Link(host, config.get('root'))
     folders, files = job_paths(args)
     synced = False
     say(f'Remote worker: {stage} on {host}.')
@@ -395,12 +433,12 @@ def proxy(stage, args) -> int:
         push_code(link)
         push_models(link)
         for file in files:
-            link.rsync(str(file), f'{host}:{file}')
+            link.rsync(str(file), link.remote(file))
         sync_folders(link, folders)
         synced = True
-        spec = dict(command=worker, cwd=str(ROOT), env=remote_env(), lock=str(LOCK),
-                    lock_wait=float(config.get('lock_wait', 120)))
-        runner = subprocess.Popen(link.ssh('python3', '-u', shlex.quote(str(ROOT / 'tools/remote_exec.py'))),
+        spec = dict(command=worker, cwd=str(ROOT), env=remote_env(), lock=str(link.path(LOCK)),
+                    lock_wait=float(config.get('lock_wait', 120)), view=link.view)
+        runner = subprocess.Popen(link.ssh('python3', '-u', shlex.quote(str(link.path(ROOT / 'tools/remote_exec.py')))),
                                   stdin=subprocess.PIPE)
         try:
             runner.stdin.write((json.dumps(spec) + '\n').encode('utf-8'))
@@ -421,27 +459,44 @@ def proxy(stage, args) -> int:
                 say(f'Could not copy results back from {host}: {error}')
                 raise
             for file in files:
-                link.run('rm -f', str(file))
+                link.run('rm -f', str(link.path(file)))
 
 
-def init_mirror(host):
+def init_mirror(link):
     """Create the mirror directory on the host and copy the source there."""
-    link = Link(host)
     link.open()
     try:
-        link.run('mkdir -p', str(ROOT))
+        link.run('mkdir -p', str(link.root))
     except RemoteError as error:
-        raise RemoteError(f'{error}\nThe host needs the same absolute path as this checkout ({ROOT}). '
-                          'Create it once with sudo and give your user ownership.') from None
+        hint = (f'The host needs the same absolute path as this checkout ({ROOT}). Create it once with sudo '
+                'and give your user ownership, or store the mirror elsewhere with remote_workers.root.'
+                if link.root == ROOT else 'Choose a writable remote_workers.root.')
+        raise RemoteError(f'{error}\n{hint}') from None
     push_code(link)
-    marker = json.dumps(dict(version=1, source=str(ROOT), created=time.strftime('%Y-%m-%dT%H:%M:%S')))
-    link.run(f'mkdir -p {shlex.quote(str(ROOT / ".setup"))} && cat > {shlex.quote(str(ROOT / MARKER))}',
-             input=marker)
-    say(f'Mirror ready at {host}:{ROOT}')
+    marker = json.dumps(dict(version=1, source=str(ROOT), root=str(link.root),
+                             created=time.strftime('%Y-%m-%dT%H:%M:%S')))
+    link.run(f'mkdir -p {shlex.quote(str(link.path(ROOT / ".setup")))} && '
+             f'cat > {shlex.quote(str(link.path(ROOT / MARKER)))}', input=marker)
+    say(f'Mirror ready at {link.host}:{link.root}' + (f' (workers see it at {ROOT})' if link.view else ''))
+
+
+def setup_command(link, profiles) -> list[str]:
+    """Build runtimes on the host where the workers will see them (inside their path view)."""
+    build = ['python3', '-u', 'tools/setup_linux.py', '--profiles', *profiles]
+    if not link.view:
+        return link.ssh('cd', shlex.quote(str(ROOT)), '&&', *build)
+    return link.ssh('python3', '-I', shlex.quote(str(link.path(ROOT / 'mocap/path_view.py'))), 'run',
+                    '--map', shlex.quote(f'{ROOT}={link.root}'), '--chdir', shlex.quote(str(ROOT)), '--', *build)
 
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    try:
+        # Run where the GUI runs: inside the configured path view (no-op inside it or without one).
+        path_view.reenter(ROOT, [sys.executable, '-X', 'utf8', '-m', 'mocap.remote_workers', *argv], cwd=ROOT)
+    except path_view.ViewError as error:
+        print(error, file=sys.stderr, flush=True)
+        return 3
     if argv and argv[0] in ('--init', '--setup'):
         import argparse
         parser = argparse.ArgumentParser(prog='python3 -m mocap.remote_workers')
@@ -449,19 +504,23 @@ def main(argv=None) -> int:
         parser.add_argument('--setup', nargs='*', metavar='PROFILE',
                             help='Build runtimes on the host (default: shared exmr).')
         parser.add_argument('--host', help='SSH host; defaults to the configured one.')
+        parser.add_argument('--root', help='Mirror folder on the host; defaults to remote_workers.root, '
+                                           'else this checkout\'s path.')
         options = parser.parse_args(argv)
         host = options.host or settings().get('host')
         if not host:
             parser.error('No host: pass --host or configure remote_workers.host in config/local.json.')
-        if options.init:
-            init_mirror(host)
-        if options.setup is not None:
-            link = Link(host)
-            link.open()
-            push_code(link)
-            profiles = options.setup or ['shared', 'exmr']
-            return subprocess.run(link.ssh('cd', shlex.quote(str(ROOT)), '&&', 'python3', '-u',
-                                           'tools/setup_linux.py', '--profiles', *profiles)).returncode
+        try:
+            link = Link(host, options.root or settings().get('root'))
+            if options.init:
+                init_mirror(link)
+            if options.setup is not None:
+                link.open()
+                push_code(link)
+                return subprocess.run(setup_command(link, options.setup or ['shared', 'exmr'])).returncode
+        except RemoteError as error:
+            print(f'Remote worker setup failed: {error}', file=sys.stderr, flush=True)
+            return 3
         return 0
     if not argv:
         print(__doc__)

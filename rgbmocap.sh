@@ -1,6 +1,11 @@
 #!/bin/sh
 # Start RGB MoCap on Linux with the pinned GUI runtime (see docs/LINUX.md).
 root="$(cd "$(dirname "$0")" && pwd)"
+# Optional "path_view" in config/local.json (docs/LINUX.md#shared-project-path): show this
+# folder at the path its projects were made under, then start again from inside that view.
+if [ -z "${RGB_MOCAP_VIEW:-}" ] && grep -qs '"path_view"' "$root/config/local.json"; then
+    exec python3 -I "$root/mocap/path_view.py" enter "$root" -- "$root/rgbmocap.sh" "$@"
+fi
 python="$root/.venv-gui/bin/python"
 if [ ! -x "$python" ]; then
     echo "The GUI runtime is missing. Run ./install.sh first." >&2
