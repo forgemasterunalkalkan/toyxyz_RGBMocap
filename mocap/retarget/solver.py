@@ -49,11 +49,15 @@ def local_from_world(world):
     return q
 
 def baseline(source_world, srest, trest):
-    child = {0: 3, 1: 4, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 12: 15, 13: 16, 14: 17, 16: 18, 17: 19, 18: 20, 19: 21}
+    child = {0: 3, 1: 4, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 12: 15, 16: 18, 17: 19, 18: 20, 19: 21}
     offsets = np.tile(np.eye(3), (22, 1, 1))
     for (j, k) in child.items():
         offsets[j] = align(trest[k] - trest[j], srest[k] - srest[j])
-    for j in [10, 11, 15, 20, 21]:
+    # Collars keep the character's own slope and follow the performer's rotation from
+    # rest, like the chest they hang from. Each rig places these joints differently (SMPL
+    # low in the chest, game rigs near the neck), so matching their directions lifted
+    # or dropped the shoulders by the difference in slope.
+    for j in [10, 11, 13, 14, 15, 20, 21]:
         offsets[j] = offsets[PARENTS[j]]
     desired = source_world @ offsets
     return local_from_world(desired)

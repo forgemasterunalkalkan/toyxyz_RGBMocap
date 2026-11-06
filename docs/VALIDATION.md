@@ -1,5 +1,57 @@
 # Source package validation
 
+## Rest-relative collar retargeting (2026-11-06)
+
+The retarget baseline gave every body bone the source bone's world direction,
+collars included. Collar joints are placed differently by each rig: the SMPL-X
+source puts them low in the chest, so its collar rises 28-30 degrees to the
+shoulder in rest, while the nineteen tested game characters slope from -28 to
++20 degrees. Matching directions therefore swung each character's collar by the
+difference, lifting the shoulder joints toward the ears; on the steepest rig they
+moved from 8 cm below the neck joint in rest to 4 cm above it in a typical frame.
+
+Collars now take the chest's rest offset, as the end bones already take their
+parent's. Each character keeps its own collar slope and follows the performer's
+collar rotation from rest, including shrugs and overhead reaches. Every other
+bone, the root, contacts and the bake are unchanged; arm direction is still
+matched in world space, so hands move with the shoulder joint.
+
+Checks used the character Blender runtime on Linux with one ExMR
+`corrected_initial` take (438 frames, large arm motion). Before the change the
+steepest rig's collar elevation in the chest frame equalled the source's on every
+frame (median +31/+33 degrees). After it, typical shoulder-joint height stayed within 3 cm
+of each character's rest on five rigs (Mixamo-named with -28, -23, -19 and +20
+degree slopes, and Auto-Rig Pro), against 0.3-0.5 cm for the source, and all five
+retarget jobs completed. These are joint-position measurements and offscreen
+renders, not a Windows run or a subjective playback review.
+
+## Palm-relative finger retargeting (2026-11-06)
+
+The character bake previously aimed each finger bone along its tail and gave it
+the performer's finger direction in world space, aligned at the first frame. Two
+problems followed. Maya-exported rigs with X-aimed joints import with finger
+tails about 90 degrees off the finger (seven of nineteen tested character files),
+which turned fingers sideways. And a character whose palm rests a few degrees
+away from the source palm (4-19 degrees across the tested rigs) held every finger
+that far off its own hand, which widened the spread on long-fingered characters.
+
+Finger bones are now aimed at the next finger joint, as the source is (end bones
+or the tail are used only for the last bone). Finger directions are transferred
+relative to each skeleton's palm, framed identically on both: wrist to middle
+knuckle and the index-to-pinky knuckle line. Rigs or sources without those three
+knuckles keep the previous transfer. Body, wrist, root and contact processing
+are unchanged.
+
+Checks used the character Blender runtime on Linux with ExMR `corrected_initial`
+takes (333 frames). On an affected rig, finger bend axes along the knuckle line
+rose from 54% to 99% of bent samples and the mean middle-joint bend fell from 83
+to 54 degrees (source 54). Finger-segment directions in the palm frame matched
+the source within 0.05 degrees on every frame for the affected rig, a mirrored-axis
+Mixamo-named rig, Auto-Rig Pro, Advanced Skeleton and two standard Mixamo rigs;
+before the change they differed by the palm offset. Hand rotations themselves were
+not changed, so palm offsets remain. These are bone-direction measurements and
+offscreen renders, not a Windows run or a subjective playback review.
+
 ## Resource Safety control (2026-11-03)
 
 The default-on checkbox below Resource Mode controls the existing desktop

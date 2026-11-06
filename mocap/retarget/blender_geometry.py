@@ -38,12 +38,14 @@ def register(OUT,kind,rig,arm,mapping,rest):
   # Store registered material indices in the complete eligible-foot subset.
   lookup={value:i for i,value in enumerate(ids)}
   payload.update({f'foot_v{side}':v[ids],f'foot_w{side}':W[ids],f'foot_ids{side}':ids,f'heel{side}':np.array([lookup[i] for i in heel]),f'toe{side}':np.array([lookup[i] for i in fore])})
-  wrist=20+side;finger=[b for b in arm.data.bones if b.name.startswith(mapping[wrist]) and b.name!=mapping[wrist]]
+  wrist=20+side;hand=arm.data.bones[mapping[wrist]];finger=[b for b in arm.data.bones if hand in b.parent_recursive]
   # Registered palm region excludes finger-dominant vertices.
   palm_length=max(.025,float(np.median([np.linalg.norm(np.array(arm.matrix_world@b.head_local)@A-rest[wrist]) for b in finger if np.linalg.norm(np.array(arm.matrix_world@b.head_local)@A-rest[wrist])>.015])) if finger else .055)
   hand_dist=np.linalg.norm(v-rest[wrist],axis=1)
   hand_ids=np.flatnonzero((HW[:,side]>.95)&(hand_dist>palm_length*.15)&(hand_dist<min(palm_length*1.1,.14*height)))
   if len(hand_ids)<8:hand_ids=np.flatnonzero((HW[:,side]>.85)&(hand_dist<.10*height))
+  # Rigs that share palm skin between hand and finger bones (hand weight below 0.85).
+  if len(hand_ids)<=3:hand_ids=np.flatnonzero((HW[:,side]>.5)&(hand_dist<min(palm_length*1.1,.14*height)))
   assert len(hand_ids)>3,(kind,side,'palm')
   payload.update({f'palm_v{side}':v[hand_ids],f'palm_w{side}':W[hand_ids],f'palm_ids{side}':hand_ids})
   counts.append(dict(foot_vertices=len(ids),sole_vertices=len(bottom),palm_vertices=len(hand_ids),shin_weighted_sole_vertices=int((W[bottom,shin]>.5).sum())))

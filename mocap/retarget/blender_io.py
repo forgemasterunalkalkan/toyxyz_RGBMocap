@@ -47,9 +47,20 @@ def import_character(filename, out):
         addon_utils.enable('mmd_tools',default_set=False,persistent=False)
         bpy.ops.mmd_tools.import_model(filepath=str(filename),types={'MESH','ARMATURE'},scale=.08,log_level='ERROR')
     arms=[o for o in bpy.context.scene.objects if o.type=='ARMATURE']
+    if len(arms)>1:
+        # Rig exports can carry control armatures (e.g. a 6-bone FKOffsetNeck_M) that deform nothing.
+        skins={a:[o for o in bpy.context.scene.objects if o.type=='MESH' and any(m.type=='ARMATURE' and m.object==a for m in o.modifiers)] for a in arms}
+        used=[a for a in arms if skins[a]]
+        if len(used)!=1:raise ValueError('Import one humanoid armature per character file.')
+        stray=[a for a in arms if a is not used[0]]
+        report('Ignoring control armature(s) that deform no mesh: '+', '.join(a.name for a in stray))
+        for a in stray:bpy.data.objects.remove(a,do_unlink=True)
+        arms=used
     if len(arms)!=1:raise ValueError('Import one humanoid armature per character file.')
     arm=arms[0]
-    mapping=body_mapping(kind,arm.data.bones.keys(),semantic)
+    deforming={g.name for o in bpy.context.scene.objects if o.type=='MESH' for g in o.vertex_groups}
+    parents={b.name:b.parent.name if b.parent else None for b in arm.data.bones}
+    mapping=body_mapping(kind,arm.data.bones.keys(),semantic,deforming,parents)
     trajectory_root=body_trajectory_root({b.name:b.parent.name if b.parent else None for b in arm.data.bones},mapping)
     for o in bpy.context.scene.objects:
         o.animation_data_clear()
@@ -74,13 +85,25 @@ def import_character(filename, out):
     meshes=[o for o in bpy.context.scene.objects if o.type=='MESH']
     count=sum(len(o.data.vertices) for o in meshes)
     if not 0<count<=1_000_000:raise ValueError('Character preview supports 1 to 1,000,000 vertices.')
-    rig=dict(kind=kind,armature=arm.name,semantic=semantic,trajectory_root=trajectory_root,bones=[dict(name=b.name,parent=b.parent.name if b.parent else None) for b in arm.data.bones],meshes=[dict(name=o.name,vertices=len(o.data.vertices)) for o in meshes])
+    fingers,naming=({},None)
+    if kind=='mixamo':
+        from .mapping import FINGERS,resolve_roles
+        roles,naming=resolve_roles(arm.data.bones.keys(),deforming,parents)
+        fingers={r:roles[r] for r in FINGERS if r in roles}
+        if naming!='Mixamo':report(naming+' bone names recognized')
+    rig=dict(kind=kind,armature=arm.name,semantic=semantic,fingers=fingers,naming=naming,trajectory_root=trajectory_root,bones=[dict(name=b.name,parent=b.parent.name if b.parent else None) for b in arm.data.bones],meshes=[dict(name=o.name,vertices=len(o.data.vertices)) for o in meshes])
     Path(io_path(out/f'{kind}-rig.json')).write_text(json.dumps(rig,ensure_ascii=False),encoding='utf8')
     np.savez(io_path(out/f'{kind}-canonical.npz'),rest=rest,names=mapping,parents=PARENTS)
     from .blender_geometry import register
     report('Registering soles, palms and humanoid proportions')
     register(out,kind,rig,arm,mapping,rest)
-    bpy.ops.file.pack_all()
+    # Pack the textures that exist; exports often point at files on another machine.
+    missing=[]
+    for image in bpy.data.images:
+        if image.packed_file or image.source not in {'FILE','SEQUENCE','TILED'} or not image.filepath:continue
+        if Path(bpy.path.abspath(image.filepath)).is_file():image.pack()
+        else:missing.append(Path(image.filepath).name)
+    if missing:report(f'{len(missing)} texture file(s) not found, shown untextured: '+', '.join(sorted(set(missing))[:6]))
     save_blend(out/f'{kind}-rest.blend')
     preview(out,arm,None,1)
     metadata=dict(kind=kind,name=filename.stem,vertices=count,bones=len(arm.data.bones))
@@ -113,7 +136,7 @@ def vertex_colors(obj):
                 node=next((n for n in nodes if n.type=='TEX_IMAGE' and n.image and ('shade' not in n.name.lower())),None)
                 if node:tex=node.image
         pixels=None
-        if tex and tex.size[0]*tex.size[1]<=16_777_216:
+        if tex and 0<tex.size[0]*tex.size[1]<=16_777_216:  # A missing texture file loads as 0x0.
             pixels=np.empty(tex.size[0]*tex.size[1]*4,np.float32)
             tex.pixels.foreach_get(pixels);pixels=pixels.reshape(tex.size[1],tex.size[0],4)
         materials.append((col,pixels))

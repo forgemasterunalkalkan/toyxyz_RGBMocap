@@ -37,6 +37,21 @@ def align(a, b):
     K = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
     return np.eye(3) + K + K @ K / max(1 + c, 1e-10)
 
+def hand_frame(hand, middle, index, pinky):
+    """Palm axes as matrix columns: wrist to middle knuckle, knuckle line, palm normal."""
+    forward = middle - hand
+    length = np.linalg.norm(forward, axis=-1, keepdims=True)
+    if np.any(length < 1e-9):
+        return None
+    forward = forward / length
+    across = index - pinky
+    across = across - forward * np.sum(across * forward, axis=-1, keepdims=True)
+    length = np.linalg.norm(across, axis=-1, keepdims=True)
+    if np.any(length < 1e-9):
+        return None
+    across = across / length
+    return np.stack([forward, across, np.cross(forward, across)], axis=-1)
+
 def bake(kind, label, method):
     start = time.perf_counter()
     timings = {}
@@ -61,31 +76,68 @@ def bake(kind, label, method):
     source_rest = source_asset['rest']
     extra = {}
     base = np.load(io_path(OUT / (label + '-' + kind + '-rotation.npz')))
-    for (j, name) in enumerate(source_names[22:], 22):
+    def finger_target(name):
         side = 'left' if name.startswith('Left') else 'right'
-        hand = 20 if side == 'left' else 21
         suffix = name.split('Hand')[1]
         finger = suffix[:-1]
         phalanx = int(suffix[-1])
-        target = None
         if kind in {'mixamo', 'warrok', 'ch14'}:
-            target = next((b.name for b in bones if b.name.split(':')[-1]==name), None)
-        elif kind == 'vrm':
+            return rig.get('fingers', {}).get(name) or next((b.name for b in bones if b.name.split(':')[-1]==name), None)
+        if kind == 'vrm':
             semantic = side + ('Little' if finger == 'Pinky' else finger) + ['Proximal', 'Intermediate', 'Distal'][phalanx - 1]
-            target = rig['semantic'].get(semantic)
-        else:
-            jp = {'Thumb': '親指', 'Index': '人指', 'Middle': '中指', 'Ring': '薬指', 'Pinky': '小指'}[finger]
-            number = phalanx - 1 if finger == 'Thumb' else phalanx
-            target = jp + '０１２３'[number] + ('.L' if side == 'left' else '.R')
+            return rig['semantic'].get(semantic)
+        jp = {'Thumb': '親指', 'Index': '人指', 'Middle': '中指', 'Ring': '薬指', 'Pinky': '小指'}[finger]
+        number = phalanx - 1 if finger == 'Thumb' else phalanx
+        return jp + '０１２３'[number] + ('.L' if side == 'left' else '.R')
+    # Fingers follow the performer relative to the palm, not in world space: a character
+    # whose palm rests a few degrees away from the source's otherwise holds every finger
+    # that far off its own hand. Palms are framed identically on both skeletons.
+    palms = {}
+    for (hand, prefix) in ((20, 'Left'), (21, 'Right')):
+        keys = [prefix + 'Hand' + f + '1' for f in ('Middle', 'Index', 'Pinky')]
+        targets = [str(data['names'][hand])] + [finger_target(k) for k in keys]
+        if not all(k in source_names for k in keys) or not all(t in indices for t in targets):
+            continue
+        sources = [source_names.index(n) for n in [prefix + 'Hand'] + keys]
+        palm_frames = (hand_frame(*(rest[indices[t]] @ A for t in targets)),
+                  hand_frame(*(source_rest[i] for i in sources)),
+                  hand_frame(*(np.asarray(source_frames[:, i, :3, 3], float) for i in sources)))
+        if all(f is not None for f in palm_frames):
+            palms[hand] = palm_frames
+    for (j, name) in enumerate(source_names[22:], 22):
+        hand = 20 if name.startswith('Left') else 21
+        phalanx = int(name[-1])
+        target = finger_target(name)
         if target not in indices:
             continue
         target_bone = bones[indices[target]]
-        vtarget = np.array(arm.matrix_world @ target_bone.tail_local) - rest[indices[target]]
+        head = rest[indices[target]]
+        # Aim along the joints the finger actually runs through, as the source does. A bone's
+        # tail is only an axis convention: Maya "Behavior" mirroring points one side's tails
+        # back toward the wrist, and X-aimed joints point them sideways.
+        following = finger_target(source_names[j + 1]) if phalanx < 3 else None
+        if following in indices:
+            vtarget = rest[indices[following]] - head
+        elif target_bone.children:
+            vtarget = np.mean([np.array(arm.matrix_world @ c.head_local) for c in target_bone.children], axis=0) - head
+        else:
+            chain = head - rest[indices[target_bone.parent.name]]
+            vtarget = np.array(arm.matrix_world @ target_bone.tail_local) - head
+            if vtarget @ chain < 0:
+                vtarget = -vtarget
+            if vtarget @ chain < np.cos(np.radians(45)) * np.linalg.norm(vtarget) * np.linalg.norm(chain):
+                vtarget = chain
         vsource = source_rest[j + 1] - source_rest[j] if phalanx < 3 else source_asset['ends'][j]
-        C = align(vtarget @ A, vsource)
-        Ch = source_frames[0, hand, :3, :3].T @ base['world'][0, hand]
-        relative = source_frames[:, hand, :3, :3].swapaxes(-1, -2) @ source_frames[:, j, :3, :3]
-        extra[target] = data['world'][:, hand] @ Ch.T @ relative @ C
+        if hand in palms:
+            (target_palm, source_palm, source_palms) = palms[hand]
+            H = target_palm @ source_palm.T
+            C = H.T @ align(vtarget @ A, H @ vsource)
+            extra[target] = data['world'][:, hand] @ target_palm @ source_palms.swapaxes(-1, -2) @ source_frames[:, j, :3, :3] @ C
+        else:
+            C = align(vtarget @ A, vsource)
+            Ch = source_frames[0, hand, :3, :3].T @ base['world'][0, hand]
+            relative = source_frames[:, hand, :3, :3].swapaxes(-1, -2) @ source_frames[:, j, :3, :3]
+            extra[target] = data['world'][:, hand] @ Ch.T @ relative @ C
     total_bones = len(bones)
     keyed = set(mapped) | set(extra) | ({'腰'} if kind == 'pmx' else set())
     needed = set(keyed)

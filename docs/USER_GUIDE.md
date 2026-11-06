@@ -63,6 +63,12 @@ the first animation frame does not replace the rest pose. Existing retargeted
 characters can be exported again to use the corrected FBX rest-pose handling.
 
 Known humanoid mappings are automatic; custom bone mapping is not yet available.
+FBX bones are recognized by Mixamo names (any case, after any prefix such as
+`mixamorig:`, `mixamorig1:` or `Bind_`), or by the Advanced Skeleton (`Root_M`,
+`Hip_L`, `Wrist_L`) and Auto-Rig Pro (`root.x`, `thigh_stretch.l`, `hand.l`)
+conventions. When control copies share a name, the bone that deforms the mesh is
+used. Extra armatures that deform no mesh (exported rig controls) are ignored, and
+texture files that cannot be found are reported and shown untextured.
 Files missing required body bones are rejected with a message. The viewport shows
 base-color textures at their original resolution, with simplified lighting rather
 than a full material/physics renderer. Existing characters prepare a texture cache
