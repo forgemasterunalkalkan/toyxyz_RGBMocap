@@ -19,5 +19,9 @@ def worker_command(stage: str, *args: str) -> list[str]:
     if stage.startswith('mamma_') and stage not in ('mamma_prepare','mamma_publish'):
         from .mamma_runtime import command as mamma_command
         return mamma_command(stage,args)
+    if os.name != 'nt':
+        # Linux: developer-layout runtimes, GPU stages optionally on a remote host.
+        from .remote_workers import command as linux_command
+        return linux_command(ROOT, stage, args)
     from .runtime_registry import command
     return command(ROOT, stage, args, frozen=bool(getattr(sys, "frozen", False)))

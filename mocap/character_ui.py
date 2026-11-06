@@ -233,13 +233,13 @@ class CharacterWorkspace:
 
     def start_character_job(self,job):
         from .retarget.runtime import blender
-        from .runtime_registry import command
+        from .paths import worker_command
         try:
             if job['mode']!='adopt':blender()
             path=self.character_root/'characters'/('job-'+uuid.uuid4().hex+'.json');atomic_json(path,job)
             args=['--request',str(path)]
             if job['mode']=='retarget':args+=['--project',job['takes'][0]['project']]
-            cmd=command(ROOT,'character',args,frozen=getattr(sys,'frozen',False))
+            cmd=worker_command('character',*args)
         except Exception as exc:
             self.character_refresh_queue=[]
             self.status.setText(str(exc));return
@@ -252,6 +252,8 @@ class CharacterWorkspace:
         p.finished.connect(self.character_finished)
         p.errorOccurred.connect(lambda error:self.character_finished(-1) if error==QProcess.FailedToStart else None)
         self.busy=True;self.progress.setRange(0,0);self.character_timer.start();self.character_progress();self.update_readiness()
+        from .platform_support import isolate_process
+        isolate_process(p)
         p.start(cmd[0],cmd[1:])
 
     def character_output(self, final=False):
@@ -306,6 +308,10 @@ class CharacterWorkspace:
         p=self.character_process
         if not p:return
         self.character_cancelled=True;self.character_line='Cancelling character job...'
+        if os.name!='nt':
+            from .platform_support import kill_tree
+            if not kill_tree(p.processId()):p.kill()
+            return
         helper=QProcess(self);self._character_killer=helper
         helper.start('taskkill',['/PID',str(p.processId()),'/T','/F'])
         helper.finished.connect(helper.deleteLater)

@@ -1408,6 +1408,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.process.finished.connect(self.process_finished)
         self.process.errorOccurred.connect(self.process_error)
         self.process.started.connect(self.start_processing_guard)
+        from .platform_support import isolate_process
+        isolate_process(self.process)
         self.process.start(command[0], command[1:])
 
     def start_processing_guard(self):
@@ -1590,7 +1592,9 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
                 helper.finished.connect(cancelled)
                 helper.start("taskkill.exe", ["/PID", str(worker.processId()), "/T", "/F"])
             else:
-                worker.kill()
+                # The worker leads its own session: stop it with FFmpeg and remote-proxy children.
+                from .platform_support import kill_tree
+                if not kill_tree(worker.processId()):worker.kill()
         self.status.setText("Cancelled. Completed stages will be reused next time.")
 
     def refresh_results(self):

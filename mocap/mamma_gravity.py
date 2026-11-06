@@ -93,6 +93,7 @@ def world_basis(up,reference_rotation):
 def infer(work,entries,frames,rotations,intrinsics,emit):
     import json,subprocess,uuid
     from .paths import ROOT
+    from .platform_support import NO_WINDOW
     from .storage import atomic_json,sha256
     support=support_identity();token=uuid.uuid4().hex
     request=work/'gravity-request.json';output=work/'gravity-result.json'
@@ -102,7 +103,7 @@ def infer(work,entries,frames,rotations,intrinsics,emit):
     digest=sha256(request)
     process=subprocess.Popen([str(ROOT/'runtime/python.exe'),'-I','-X','utf8','-B','-u',
         str(ROOT/'worker_boot.py'),'flow_mamma_gravity',str(request)],stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',creationflags=0x08000000)
+        stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',creationflags=NO_WINDOW)
     tail=[]
     try:
         while True:

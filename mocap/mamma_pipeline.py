@@ -14,6 +14,7 @@ import sys
 import time
 import traceback
 import uuid
+from .platform_support import NO_WINDOW
 from .storage import atomic_json
 from .image_io import read_image, write_image, unicode_image_paths
 from .result_artifacts import file_stat
@@ -139,7 +140,7 @@ def prepare(path, job):
         subprocess.run([executable('ffmpeg'),'-hide_banner','-loglevel','error','-i',entry['path'],
             '-map','0:v:0','-an','-vf',vf,'-frames:v',str(n),'-fps_mode','cfr','-c:v','libx264',
             '-preset','fast','-crf','18','-pix_fmt','yuv420p','-threads','2',str(output)],
-            check=True,creationflags=0x08000000)
+            check=True,creationflags=NO_WINDOW)
         info=probe(output)
         if info['frames']!=n or abs(info['fps']-30)>.001:
             raise ValueError('Camera frame count differs from the common trim; synchronize or shorten the inputs.')

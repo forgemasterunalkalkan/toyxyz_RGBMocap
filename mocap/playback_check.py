@@ -67,7 +67,7 @@ def schedule_check(window, seconds, output: Path, screenshot: Path | None, finis
                   "last_frame": samples[-1][1] if samples else None,
                   "cpu_core_percent": (cpu_time() - state["cpu"]) / elapsed * 100,
                   "logical_processors": psutil.cpu_count(),
-                  "peak_process_ram_mib": process.memory_info().peak_wset / 1024**2,
+                  "peak_process_ram_mib": __import__('mocap.platform_support',fromlist=['peak_rss']).peak_rss(process) / 1024**2,
                   "private_mib": process.memory_info().private / 1024**2,
                   "os_threads": process.num_threads(),
                   "inference_modules_loaded": "torch" in sys.modules}

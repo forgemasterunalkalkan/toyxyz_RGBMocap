@@ -1,0 +1,97 @@
+"""Remote side of mocap.remote_workers: run one worker, stop it when the SSH link closes.
+
+Started as ``python3 tools/remote_exec.py`` on the GPU host with the job spec as
+the first stdin line (JSON: command, cwd, env, lock, lock_wait). The worker's
+stdout/stderr go straight back through SSH. When stdin reaches EOF - the GUI
+cancelled, the laptop proxy died or the connection dropped - the worker's whole
+process group is stopped, so no GPU job keeps running unattended.
+
+Standard library only; runs with the host's system Python 3.
+"""
+import fcntl
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+
+def stop(pid, grace=5.0):
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 0)):
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+            time.sleep(0.1)
+
+
+def acquire(path, wait):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle = open(path, 'a+')
+    deadline = time.monotonic() + wait
+    announced = False
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError:
+            if not announced:
+                print('Waiting for the previous remote job to stop...', flush=True)
+                announced = True
+            if time.monotonic() > deadline:
+                handle.close()
+                return None
+            time.sleep(0.5)
+
+
+def read_spec():
+    # Raw descriptor reads: a buffered stdin shared with the watcher thread can abort
+    # interpreter shutdown while that thread is blocked in read().
+    data = b''
+    while not data.endswith(b'\n'):
+        chunk = os.read(0, 65536)
+        if not chunk:
+            break
+        data += chunk
+    return json.loads(data)
+
+
+def main():
+    spec = read_spec()
+    lock = acquire(spec['lock'], float(spec.get('lock_wait', 120)))
+    if lock is None:
+        print('The GPU host is still busy with another RGB MoCap job.', file=sys.stderr, flush=True)
+        return 75
+    env = os.environ.copy()
+    env.update(spec.get('env', {}))
+    child = subprocess.Popen(spec['command'], cwd=spec['cwd'], env=env, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+
+    def watch():
+        try:
+            while os.read(0, 65536):
+                pass
+        finally:
+            if child.poll() is None:
+                stop(child.pid)
+
+    threading.Thread(target=watch, daemon=True).start()
+    code = child.wait()
+    stop(child.pid, grace=1.0)  # Reap descendants such as FFmpeg that outlived the worker.
+    lock.close()
+    return code if code >= 0 else 128 - code
+
+
+if __name__ == '__main__':
+    result = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(result)  # Do not wait for the watcher thread blocked on stdin.
