@@ -55,6 +55,8 @@ REMOTE_STAGES = frozenset({
 })
 # Worker-only caches inside a project, rebuilt on the host from input.mp4.
 HOST_ONLY = frozenset({'exmr_frames'})
+# Local Model Manager stages whose result is uploaded to the host afterwards.
+UPLOAD_AFTER = frozenset({'download', 'import_model'})
 FORWARD_ENV = ('PYTHONIOENCODING', 'PYTHONUNBUFFERED', 'PYTHONUTF8', 'PYTHONDONTWRITEBYTECODE',
                'HF_HOME', 'TORCH_HOME', 'XDG_CACHE_HOME')
 MARKER = '.setup/remote-mirror.json'
@@ -97,6 +99,10 @@ def command(root, stage, args) -> list[str]:
     config = settings()
     if config.get('host') and stage in remote_stages(config):
         return [sys.executable, '-X', 'utf8', '-m', 'mocap.remote_workers', stage, *map(str, args)]
+    if config.get('host') and stage in UPLOAD_AFTER:
+        # Model Manager: download or import here as usual, then upload to the workstation,
+        # whose copy is the one the GUI checks for remote stages (mocap/model_status.py).
+        return [sys.executable, '-X', 'utf8', '-m', 'mocap.remote_workers', '--upload-after', stage, *map(str, args)]
     return local_command(root, stage, args)
 
 
@@ -253,6 +259,46 @@ def push_models(link):
     say(f'Uploading {len(sizes)} model file(s), {sum(sizes) / 2**30:.2f} GiB, to {link.host}...')
     link.rsync('--exclude=*.part', '--exclude=*.partial', str(models) + '/', link.remote(models) + '/',
                progress='Uploading models')
+
+
+MODEL_SCAN = r'''
+import json,os,sys
+out={}
+for key,path,receipt in json.load(sys.stdin):
+    if not os.path.isfile(path):continue
+    value=os.stat(path);text=None
+    if receipt:
+        try:
+            with open(path+'.receipt.json',encoding='utf-8') as handle:text=handle.read(65536)
+        except OSError:pass
+    out[key]=[value.st_size,value.st_mtime_ns,text]
+print(json.dumps(out))
+'''
+
+
+def model_inventory(link) -> dict:
+    """{key: [size, mtime_ns, receipt text]} for every registered model file on the host."""
+    from .models import MODELS_LIST, receipt_required
+    entries = [[model.key, str(link.path(model.path)), receipt_required(model)] for model in MODELS_LIST]
+    return json.loads(link.run('python3 -c ' + shlex.quote(MODEL_SCAN), input=json.dumps(entries)))
+
+
+def upload_after(stage, args) -> int:
+    """Run a local Model Manager stage, then upload new model files to the host."""
+    code = subprocess.run(local_command(ROOT, stage, args)).returncode
+    if code:
+        return code
+    config = settings()
+    link = Link(config['host'], config.get('root'))
+    try:
+        link.open()
+        push_models(link)
+    except RemoteError as error:
+        print(f'The model is saved on this computer, but uploading it to {link.host} failed: {error}',
+              file=sys.stderr, flush=True)
+        return 3
+    say(f'Models on {link.host} are up to date.')
+    return 0
 
 
 def scan(folder: Path) -> dict:
@@ -528,6 +574,16 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     signal.signal(signal.SIGHUP, lambda *_: sys.exit(129))
     try:
+        if argv[0] == '--model-status':
+            config = settings()
+            if not config.get('host'):
+                raise RemoteError('No remote host configured.')
+            link = Link(config['host'], config.get('root'))
+            link.open()
+            print(json.dumps(model_inventory(link)), flush=True)
+            return 0
+        if argv[0] == '--upload-after' and len(argv) > 1 and argv[1] in UPLOAD_AFTER:
+            return upload_after(argv[1], argv[2:])
         return proxy(argv[0], argv[1:])
     except RemoteError as error:
         print(f'Remote worker failed: {error}', file=sys.stderr, flush=True)

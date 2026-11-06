@@ -262,17 +262,25 @@ STAGE_REQUIREMENTS = {
 }
 
 
+def receipt_required(model: Model) -> bool:
+    return model.key.startswith(('flow','hand','exmr','mamma','phmr','pear')) or model.key in ('smplh','mano_right')
+
+
+def receipt_matches(model: Model, receipt, size: int, mtime_ns: int) -> bool:
+    return receipt.get('stat')==[size, mtime_ns] and (not model.expected_sha256 or receipt.get('sha256')==model.expected_sha256)
+
+
 def ready(model: Model) -> bool:
     if model.key=='pear_geometry':
         from .pear_models import geometry_ready
         return geometry_ready()
     valid=model.path.is_file() and model.path.stat().st_size >= model.minimum_bytes
-    if valid and (model.key.startswith(('flow','hand','exmr','mamma','phmr','pear')) or model.key in ('smplh','mano_right')):
+    if valid and receipt_required(model):
         import json
         try:
             receipt=json.loads(model.path.with_suffix(model.path.suffix+'.receipt.json').read_text(encoding='utf-8'))
             stat=model.path.stat()
-            valid=receipt.get('stat')==[stat.st_size, stat.st_mtime_ns] and (not model.expected_sha256 or receipt.get('sha256')==model.expected_sha256)
+            valid=receipt_matches(model, receipt, stat.st_size, stat.st_mtime_ns)
         except (OSError,ValueError):valid=False
     return valid
 

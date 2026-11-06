@@ -597,7 +597,8 @@ class PeopleWorkspace:
 
     def find_people(self):
         if self.busy:return
-        from .models import missing
+        if not self.remote_models_known(self.find_people):return
+        from .model_status import missing
         unavailable=missing('people')
         if unavailable:
             self.status.setText('Prepare person detection models: '+', '.join(p.name for p in unavailable))
@@ -621,7 +622,7 @@ class PeopleWorkspace:
         if not selected:
             self.status.setText('Check at least one person in the People list to extract motion.')
             return True
-        from .models import missing
+        from .model_status import missing
         unavailable=[model for stage in stages for model in ([] if self.model_choice.currentData()=='flowhmr' and stage=='flow_camera' and self.flow_sampling.currentData()==-1 else missing('flow_export' if self.model_choice.currentData()=='flowhmr' and stage in ('correct','export') else stage))]
         if unavailable:
             self.status.setText('Prepare the required motion models first.');self.open_model_manager();return True

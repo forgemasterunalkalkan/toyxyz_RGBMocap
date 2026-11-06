@@ -132,9 +132,24 @@ worker and everything it started. One job runs on the host at a time.
    ```
 
 `--setup` takes the same profiles as `install.sh`, plus `face` for
-[face capture](FACE.md). Models stay managed
-locally: import or download them in Model Manager here; the first job that
-needs them uploads them to the host (the Console shows the upload progress).
+[face capture](FACE.md).
+
+### Models
+
+With remote workers, the app checks each model where it is used. Models of
+stages that run on the host are checked **on the host**: the GUI asks the host
+for its model files at start, when Model Manager opens and after a download or
+import, and Reconstruct 3D waits for that answer. Model Manager shows
+"Ready (workstation)" or "Missing on workstation" for them. Only the SMPL-X and
+SMPL-H body models (mesh preview, retargeting, correction and export) must also
+be on this computer. A computer that uses a host therefore needs no copy of the
+large model files; `models/body_models` is enough.
+
+Download and import in Model Manager work as before on this computer, and the
+file is then uploaded to the host (the Console shows the progress). Jobs also
+upload any local model file the host lacks. A local copy is not consulted for
+host-only models, so a model that exists only here shows "Missing on workstation"
+until it is downloaded or imported again, which uploads it.
 
 ### Limits
 

@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFil
     QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
 
-from .models import MODELS_LIST, import_body_model, missing, ready
+from .models import MODELS_LIST, import_body_model
+from .model_status import missing, ready  # Remote workers: workstation models are checked there.
 from .paths import ROOT, PROJECTS, worker_command
 from .video import select_preview
 from .viewer import VideoView, MotionView
@@ -147,7 +148,13 @@ class ModelsDialog(QDialog):
         self.setWindowTitle(f"{self.tool.label} Model Manager")
         self.resize(850, min(540, max(360, self.screen().availableGeometry().height() - 80)))
         layout = QVBoxLayout(self)
-        description = QLabel(f"Models for {self.tool.label} and compatible add-ons.\nUse Auto Download for public files, or Manual Download and Import for any model.\nRegistered body model files are not redistributed by this app.")
+        from . import model_status
+        remote = model_status.remote()
+        where = (f"\nRemote workers: models for workstation stages are checked on {remote['host']}; "
+                 "downloads and imports are uploaded there. Body models are also needed on this computer."
+                 if remote else "")
+        description = QLabel(f"Models for {self.tool.label} and compatible add-ons.\nUse Auto Download for public files, or Manual Download and Import for any model.\nRegistered body model files are not redistributed by this app."
+                             + where)
         description.setWordWrap(True)
         layout.addWidget(description)
         if self.tool.key=='mamma':
@@ -164,7 +171,7 @@ class ModelsDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["Model", "Status", "Action"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setColumnWidth(0, 300)
-        self.table.setColumnWidth(1, 130)
+        self.table.setColumnWidth(1, 170 if remote else 130)
         layout.addWidget(self.table)
         self.task_status = QTextBrowser()
         self.task_status.setFixedHeight(64)
@@ -206,12 +213,13 @@ class ModelsDialog(QDialog):
 
     def refresh(self):
         from .models import STAGE_REQUIREMENTS
+        from .model_status import describe
         for i, model in enumerate(self.models):
             name = model.name + (" (Optional: HTD / 2D)" if self.tool.key == "gvhmr" and model.key == "pva" else
                                  " (Optional: Face)" if model.key == "face_landmarker" else "")
             if self.tool.key=='pear' and model.key in STAGE_REQUIREMENTS['pear_align']:name+=' (Optional: Camera Align)'
-            available = ready(model)
-            for column, text in ((0, name), (1, "Ready" if available else "Missing")):
+            status, available = describe(model)
+            for column, text in ((0, name), (1, status)):
                 item = self.table.item(i, column)
                 if item is None:
                     item = QTableWidgetItem(); self.table.setItem(i, column, item)
@@ -247,6 +255,7 @@ class ModelsDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.window.refresh_remote_models()  # Workstation inventory; the rows update when it arrives.
         self.refresh(); self.sync_task_status()
         self.status_timer.start()
 
@@ -438,6 +447,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         # Initialize the same model-specific visibility used on selector changes.
         # Otherwise the empty GVHMR stack reserves the FlowHMR page height.
         self.select_model()
+        QTimer.singleShot(0, self.refresh_remote_models)
         if video:
             self.load_video(video)
 
@@ -470,11 +480,20 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         unavailable = [BY_KEY[key] for key in sorted(required) if not ready(BY_KEY[key])]
         count = len(required) - len(unavailable)
         text = f"{tool.label}: {count}/{len(required)} models ready"
-        if unavailable:
-            noun = "model" if len(unavailable) == 1 else "models"
-            text += f"\nWarning: {len(unavailable)} required {noun} missing.\nOpen Model Manager to download or import."
-        self.readiness.setStyleSheet("color:#ffb45c; font-weight:600;" if unavailable else "")
-        self.readiness.setToolTip(tooltip_text("Missing required models:\n" + "\n".join(model.name for model in unavailable) if unavailable else ""))
+        from . import model_status
+        if model_status.remote() is not None and not model_status.known():
+            # The workstation's inventory is still loading or unreachable: report that, not "missing".
+            problem = model_status.error()
+            text = (f"{tool.label}: cannot check the workstation's models.\nReconstruct 3D tries again."
+                    if problem else f"{tool.label}: checking models on the workstation...")
+            self.readiness.setStyleSheet("color:#ffb45c; font-weight:600;" if problem else "")
+            self.readiness.setToolTip(tooltip_text(problem or ""))
+        else:
+            if unavailable:
+                noun = "model" if len(unavailable) == 1 else "models"
+                text += f"\nWarning: {len(unavailable)} required {noun} missing.\nOpen Model Manager to download or import."
+            self.readiness.setStyleSheet("color:#ffb45c; font-weight:600;" if unavailable else "")
+            self.readiness.setToolTip(tooltip_text("Missing required models:\n" + "\n".join(model.name for model in unavailable) if unavailable else ""))
         self.readiness.setText(text)
         for button in (self.models_button, self.analyze_button, self.run_button):
             button.setEnabled(not self.busy)
@@ -646,6 +665,69 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             dialog.exec()
         finally:
             dialog.deleteLater()
+
+    def refresh_remote_models(self, then=None):
+        """Fetch the workstation's model inventory in the background (remote workers only)."""
+        from . import model_status
+        if model_status.remote() is None:
+            return
+        if then is not None:
+            self._model_status_then = [*getattr(self, '_model_status_then', []), then]
+        if getattr(self, '_model_status_process', None) is not None:
+            return
+        import sys
+        process = QProcess(self)
+        self._model_status_process = process
+        process.setWorkingDirectory(str(ROOT))
+        process.finished.connect(self.remote_models_finished)
+        process.errorOccurred.connect(
+            lambda error: self.remote_models_finished(-1, None) if error == QProcess.FailedToStart else None)
+        process.start(sys.executable, ['-X', 'utf8', '-m', 'mocap.remote_workers', '--model-status'])
+
+    def remote_models_finished(self, code, _status):
+        from . import model_status
+        process, self._model_status_process = getattr(self, '_model_status_process', None), None
+        if process is None:
+            return
+        output = bytes(process.readAllStandardOutput()).decode('utf-8', 'replace').strip()
+        errors = bytes(process.readAllStandardError()).decode('utf-8', 'replace').strip()
+        process.deleteLater()
+        try:
+            inventory = json.loads(output.splitlines()[-1]) if code == 0 and output else None
+        except ValueError:
+            inventory = None
+        if isinstance(inventory, dict):
+            model_status.set_inventory(inventory)
+        else:
+            model_status.set_error((errors or output or 'No response').splitlines()[-1][-300:])
+            self.log.append("Cannot check the workstation's models: " + model_status.error())
+        callbacks, self._model_status_then = getattr(self, '_model_status_then', []), []
+        self.update_readiness()
+        for dialog in self.findChildren(ModelsDialog):
+            dialog.refresh()
+        for callback in callbacks:
+            callback()
+
+    def remote_models_known(self, retry):
+        """True when model readiness can be decided now. Otherwise fetch the workstation's
+        inventory and run ``retry`` once when it arrives (remote workers only)."""
+        from . import model_status
+        if model_status.remote() is None or model_status.known():
+            return True
+        if getattr(self, '_model_status_failed', False):
+            self._model_status_failed = False
+            self.status.setText("Cannot check the workstation's models: " + (model_status.error() or 'no response'))
+            return False
+        self.status.setText('Checking models on the workstation...')
+        if not getattr(self, '_model_status_waiting', False):
+            self._model_status_waiting = True
+
+            def again():
+                self._model_status_waiting = False
+                self._model_status_failed = not model_status.known()
+                retry()
+            self.refresh_remote_models(then=again)
+        return False
 
     def set_active_result(self, kind):
         """Select the cached preview and sync the HTD option without inference."""
@@ -1007,6 +1089,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             return
         if self.info is None or not self.video_readable:
             self.status.setText("Wait for the video preview to finish opening.")
+            return
+        if not self.remote_models_known(lambda: self.input_jobs(stages, result)):
             return
         if 'people' not in stages and self._single_actor and not self._single_actor['checked']:
             self.status.setText('Check Person 1 in the People list to reconstruct it.')
@@ -1535,6 +1619,8 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.process = None
         self.task_state.finish(time.monotonic(),not self.failed and not self.cancelled and code==0)
         self.cleanup_fbx_export()
+        if self.current_stage in ('download', 'import_model'):
+            self.refresh_remote_models()  # The job uploaded models to the workstation.
         self.next_job()
 
     def process_error(self, error):
