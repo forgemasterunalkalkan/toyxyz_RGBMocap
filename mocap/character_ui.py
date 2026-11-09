@@ -3,15 +3,16 @@ import json,os,sys,time,uuid,shutil,codecs
 from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Qt,QProcess,QTimer,QProcessEnvironment
-from PySide6.QtWidgets import QFileDialog,QListWidgetItem,QMenu,QMessageBox
+from PySide6.QtWidgets import QFileDialog,QListWidgetItem,QMenu,QMessageBox,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton
 from .paths import ROOT,HOME
+from .tooltips import tooltip_text
 from .storage import atomic_json
 from .character_data import CharacterLoader
 
 class CharacterWorkspace:
     def init_characters(self):
         self.character_root=None;self.characters=[];self.character_assets={};self.character_process=None
-        self.character_refresh_queue=[];self.character_refresh_total=0
+        self.character_refresh_queue=[];self.character_refresh_total=0;self.character_pivots={}
         self.character_session=HOME/'character_scenes'/uuid.uuid4().hex
         self.character_loader=CharacterLoader(self)
         self.character_loader.ready.connect(self.character_ready)
@@ -23,7 +24,136 @@ class CharacterWorkspace:
         self.character_timer=QTimer(self);self.character_timer.setInterval(500)
         self.character_timer.timeout.connect(self.character_progress)
         self.people_list.characterMenuRequested.connect(self.character_menu)
+        self.people_list.currentItemChanged.connect(self.character_selection_changed)
         self.motion_view.character_workspace=self
+
+    def build_character_placement(self,column):
+        # Shown only while a character row is selected; people keep their solved placement.
+        from .scrub_spin import ScrubSpinBox
+        self.character_placement_panel=QWidget();rows=QVBoxLayout(self.character_placement_panel)
+        rows.setContentsMargins(0,0,0,0);rows.setSpacing(2)
+        header=QHBoxLayout();header.addWidget(QLabel('Offset XYZ (m)'));header.addStretch()
+        self.character_placement_reset=QPushButton('Reset');header.addWidget(self.character_placement_reset)
+        self.character_placement_reset.setToolTip(tooltip_text('Return the character to its retargeted position and direction.'))
+        self.character_placement_reset.clicked.connect(lambda:self.character_placement_edited(None,0.))
+        rows.addLayout(header)
+        hint='Drag sideways to adjust (Shift: finer); click to type. Exports include it.'
+        fields=QHBoxLayout();fields.setSpacing(3);self.character_placement_fields=[]
+        for i,(axis,meaning) in enumerate((('X','sideways'),('Y','height'),('Z','depth'))):
+            field=ScrubSpinBox(.005);field.setRange(-100,100);field.setDecimals(3);field.setSingleStep(.01)
+            field.setToolTip(tooltip_text(f'World {axis} offset ({meaning}) in meters. {hint} Ctrl+drag in the 3D view also moves the character along the floor.'))
+            fields.addWidget(field,1);self.character_placement_fields.append(field)
+        rows.addLayout(fields)
+        yaw=QHBoxLayout();yaw.setSpacing(3);yaw.addWidget(QLabel('Yaw (°)'))
+        field=ScrubSpinBox(.5);field.setRange(-180,180);field.setDecimals(1);field.setSingleStep(1);field.setWrapping(True)
+        field.setToolTip(tooltip_text('Turn the character about the vertical axis, around where its motion starts. Positive turns counterclockwise seen from above. Ctrl+Shift+drag in the 3D view also turns it. '+hint))
+        yaw.addWidget(field,1);self.character_placement_fields.append(field)
+        rows.addLayout(yaw)
+        for i,(field,name) in enumerate(zip(self.character_placement_fields,('offset X','offset Y','offset Z','yaw'))):
+            # Narrow People panels must not widen: the explicit minimum overrides the range-based hint;
+            # the labels name the axes so the values keep the whole width.
+            field.setMinimumWidth(44);field.setStyleSheet('QAbstractSpinBox{padding:3px 2px;}')
+            field.setAccessibleName('Character '+name)
+            field.valueChanged.connect(lambda value,i=i:self.character_placement_edited(i,value))
+            field.scrubFinished.connect(self.commit_character_placement)
+        self.character_placement_panel.hide();column.addWidget(self.character_placement_panel)
+
+    def character_selection_changed(self,*args):
+        # The viewport hint names Ctrl+drag only while a character is selected.
+        self.sync_character_placement();self.motion_view.update()
+
+    def sync_character_placement(self):
+        if not hasattr(self,'character_placement_panel'):return
+        c=self.selected_character()
+        self.character_placement_panel.setVisible(c is not None)
+        if c is None:return
+        for field,value in zip(self.character_placement_fields,(*c.get('offset',(0.,0.,0.)),c.get('yaw',0.))):
+            # Leave unchanged fields alone so an edit in progress keeps its text.
+            if abs(field.value()-value)>1e-9:
+                blocked=field.blockSignals(True);field.setValue(value);field.blockSignals(blocked)
+        enabled=not self.busy and not self.contact_saving
+        for widget in (*self.character_placement_fields,self.character_placement_reset):widget.setEnabled(enabled)
+
+    def character_placement_edited(self,index,value):
+        c=self.selected_character()
+        if c is None or self.busy:return
+        if index is None:
+            self.set_character_placement(c,(0.,0.,0.),0.);return
+        offset=list(c.get('offset',(0.,0.,0.)));yaw=c.get('yaw',0.)
+        if index==3:yaw=value
+        else:offset[index]=value
+        # A drag previews every step and saves once, on release.
+        self.set_character_placement(c,offset,yaw,save=not self.character_placement_fields[index].scrubbing)
+
+    def commit_character_placement(self):
+        c=self.selected_character()
+        if c is not None:self.set_character_placement(c)
+
+    def set_character_placement(self,c,offset=None,yaw=None,save=True):
+        if offset is not None:
+            offset=[round(float(v),4) for v in offset]
+            if any(offset):c['offset']=offset
+            else:c.pop('offset',None)
+        if yaw is not None:
+            yaw=round((float(yaw)+180)%360-180,3)
+            if yaw:c['yaw']=yaw
+            else:c.pop('yaw',None)
+        if save:
+            try:self.save_characters()
+            except OSError as exc:self.status.setText('Cannot save character placement: '+str(exc))
+        self.sync_character_placement();self.motion_view.update()
+
+    def character_pivot(self,c):
+        """World point where the character's motion starts (rest pose: its centre), before the user's placement."""
+        if c.get('takes'):
+            take=c['takes'][0];folder=self.character_path(c['animation']+'/'+take['folder']);transform=take.get('transform')
+        else:folder=self.character_path(c['asset']);transform=None
+        # Retargeting writes a new folder, so a folder's pivot never changes.
+        pivot=self.character_pivots.get(str(folder))
+        if pivot is None:
+            from .name_overlay import character_samples,character_points
+            try:
+                with np.load(folder/'preview.npz') as archive:asset={k:archive[k] for k in ('vertices','rows','weights')}
+                frames=np.load(folder/'preview-frames.npy',mmap_mode='r')
+                points=character_points(character_samples(asset),np.asarray(frames[0]),None if transform is None else np.asarray(transform))
+                pivot=(points.min(0)+points.max(0))*.5
+            except (OSError,ValueError,KeyError,IndexError):
+                pivot=np.zeros(3) if transform is None else np.asarray(transform,float)[:3,3]
+            self.character_pivots[str(folder)]=pivot
+        return pivot
+
+    def character_transform(self,c,transform):
+        """World matrix of one take: the user's yaw and offset are applied after the source scene transform."""
+        offset=c.get('offset');yaw=c.get('yaw')
+        if not offset and not yaw:return transform
+        T=np.eye(4) if transform is None else np.array(transform,float)
+        if yaw:
+            # Turn about the vertical line through the pivot; the offset then moves the pivot.
+            a=np.radians(yaw);R=np.array([[np.cos(a),0,np.sin(a)],[0,1,0],[-np.sin(a),0,np.cos(a)]])
+            pivot=self.character_pivot(c);U=np.eye(4);U[:3,:3]=R;U[:3,3]=pivot-R@pivot
+            T=U@T
+        if offset:T[:3,3]+=offset
+        return T.tolist()
+
+    def begin_character_drag(self):
+        """Selected character and its current world foot point, when it can be moved now."""
+        c=self.selected_character()
+        if c is None or self.busy or self.contact_saving:return None
+        from .name_overlay import character_points
+        for d,data,matrix,frame,transform in self.character_draws():
+            if d is not c:continue
+            points=character_points(data['asset'].get('name_samples'),matrix,None if transform is None else np.asarray(transform))
+            if not len(points):break
+            lo=points.min(0);hi=points.max(0)
+            return c,np.array([(lo[0]+hi[0])*.5,lo[1],(lo[2]+hi[2])*.5])
+        self.status.setText('Show the selected character at the current frame to move or turn it.')
+        return None
+
+    def move_character(self,c,delta,commit=False):
+        self.set_character_placement(c,np.asarray(c.get('offset',(0.,0.,0.)),float)+delta,save=commit)
+
+    def turn_character(self,c,degrees,commit=False):
+        self.set_character_placement(c,yaw=c.get('yaw',0.)+degrees,save=commit)
 
     def sync_characters(self):
         root=Path(self.workspace_root or self.project or self.character_session)
@@ -56,7 +186,7 @@ class CharacterWorkspace:
                 QTimer.singleShot(0,lambda:self.start_character_job(dict(mode='adopt',
                     output=str(self.character_path(folder)),prefix=folder,characters=pending,
                     source=str(self.character_session/'characters'))))
-        self.append_character_rows()
+        self.append_character_rows();self.sync_character_placement()
 
     def character_path(self,relative):
         base=(self.character_root/'characters').resolve();p=(base/relative).resolve()
@@ -80,7 +210,9 @@ class CharacterWorkspace:
         accepted=dialog.exec();options=dialog.options();dialog.deleteLater()
         if not accepted:return
         extension=options['format'];label=extension.upper()
-        stem=export_stem(c['name']);takes=c['takes']
+        stem=export_stem(c['name'])
+        # Export where the viewport shows it; the stored takes keep the source transform.
+        takes=[dict(t,transform=self.character_transform(c,t.get('transform'))) for t in c['takes']]
         if len(takes)==1:
             name,_=QFileDialog.getSaveFileName(self,'Export Character',stem+'.'+extension,f'{label} (*.{extension})')
             if not name:return
@@ -107,7 +239,7 @@ class CharacterWorkspace:
                     item=QListWidgetItem();item.setData(Qt.UserRole,key);item.setData(Qt.UserRole+1,'#69c9b8')
                     item.setFlags(item.flags()|Qt.ItemIsUserCheckable);self.people_list.addItem(item)
                 item.setText(c['name']+(' · Needs retarget' if c.get('needs_retarget') else ''));item.setCheckState(Qt.Checked if c.get('visible',True) else Qt.Unchecked)
-                item.setToolTip('Character · '+c['kind'].upper()+'\nRight-click > Retarget to choose a source person. Check to show; uncheck to hide.\n'+
+                item.setToolTip('Character · '+c['kind'].upper()+'\nRight-click > Retarget to choose a source person. Check to show; uncheck to hide.\nSelect to place it: offset and yaw below the list, Ctrl+drag (move) or Ctrl+Shift+drag (turn) in the 3D view.\n'+
                     (('Baked from '+c.get('source_name','source')+' ('+c.get('result','')+'). Apply Correction also updates linked characters. Retarget again after replacing source motion.') if c.get('takes') else 'Rest pose. No motion assigned.'))
         finally:self.people_list.blockSignals(blocked)
 
@@ -343,6 +475,7 @@ class CharacterWorkspace:
                 if take is not None and time_>=take['start']+take['frames']/take['fps']:take=None
                 if take is None:continue
                 path=self.character_path(c['animation']+'/'+take['folder']);frame=int((time_-take['start'])*take['fps']+1e-6);transform=take.get('transform')
+            transform=self.character_transform(c,transform)
             data=self.character_assets.get(str(path))
             if not data:
                 self.character_loader.request(path,frame,self.character_path(c['asset']));continue

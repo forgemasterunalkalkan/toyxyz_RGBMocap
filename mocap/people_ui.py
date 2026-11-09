@@ -23,6 +23,9 @@ PEOPLE_HELP = (
     'Right-click a row to rename it. Click its color square to change the display color. '
     'Names are used for FBX files and rigs; colors affect the preview only.\n\n'
     'If a person has separate visible sections, use the take list to switch between them.\n\n'
+    'Select an imported character to place it: set its X · Y · Z offset and yaw below the list '
+    '(drag a value sideways to adjust it, Shift for finer steps). In the 3D view, Ctrl+drag slides it '
+    'along the floor and Ctrl+Shift+drag turns it. Character exports include the placement.\n\n'
     'Automatic single-person tracking may switch people when they cross or overlap. '
     'Use Find person when keeping a specific identity matters.'
 )
@@ -275,6 +278,7 @@ class PeopleWorkspace:
         self.person_takes.currentIndexChanged.connect(self.person_take_selected)
         self.person_takes.hide()
         column.addWidget(self.person_takes)
+        self.build_character_placement(column)
         self.people_note = QLabel('')
         self.people_note.setObjectName('muted');self.people_note.setWordWrap(True)
         self.people_note.hide()

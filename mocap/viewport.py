@@ -99,7 +99,7 @@ class MotionView(ViewportBase):
         self.scene_visible=set();self.scene_colors={};self.scene_selected=None
         self.scene_time=0.;self.scene_renderers={};self.scene_presented={}
         self.character_workspace=None;self.character_renderers={};self.character_error=None
-        self.character_name_points=[]
+        self.character_name_points=[];self.character_drag=None
         self.render_mode='raw';self.show_bones=True
         self.target_frames=None;self.target_asset=None;self.raw_asset=None;self.native_vertices=None
         self.target_renderers={};self.bone_renderers={};self.bone_error=None;self.native_required=False
@@ -407,9 +407,54 @@ class MotionView(ViewportBase):
                     self.drag_point = None
                     event.accept()
                     return
+            if event.modifiers() & Qt.ControlModifier and self.character_workspace:
+                grab = self.character_workspace.begin_character_drag()
+                if grab is not None:
+                    # Ctrl moves the selected character along the floor; Ctrl+Shift turns it.
+                    turning = bool(event.modifiers() & Qt.ShiftModifier)
+                    self.character_drag = (*grab, event.position(), turning)
+                    self.setCursor(Qt.SizeHorCursor if turning else Qt.SizeAllCursor)
+                    event.accept()
+                    return
         self.drag_point = event.position()
 
+    def floor_point(self, position, height):
+        """World point under the cursor on the horizontal plane at height, or None near the horizon."""
+        eye, basis = self.camera()
+        focal = self.height() * 0.5 / math.tan(math.radians(20))
+        ray = np.array([position.x() - self.width() / 2, self.height() / 2 - position.y(), focal]) @ basis
+        ray /= np.linalg.norm(ray)
+        if abs(ray[1]) < 0.05:
+            return None
+        distance = (height - eye[1]) / ray[1]
+        return eye + ray * distance if 0 < distance < 50 * self.distance else None
+
+    def drag_character(self, position):
+        character, anchor, previous, turning = self.character_drag
+        if turning:
+            # Rightward turns counterclockwise seen from above: the side facing the camera follows the cursor.
+            self.character_workspace.turn_character(character, (position.x() - previous.x()) * 0.5)
+            self.character_drag = (character, anchor, position, turning)
+            return
+        start, end = self.floor_point(previous, anchor[1]), self.floor_point(position, anchor[1])
+        if start is not None and end is not None:
+            delta = end - start
+        else:
+            # Grazing views: slide sideways on screen, keeping the character on its floor.
+            eye, basis = self.camera()
+            depth = max(0.1, float((anchor - eye) @ basis[2]))
+            delta = basis[0] * (position.x() - previous.x()) * 2 * depth * math.tan(math.radians(20)) / max(1, self.height())
+        delta[1] = 0
+        self.character_workspace.move_character(character, delta)
+        self.character_drag = (character, anchor + delta, position, turning)
+
     def mouseReleaseEvent(self, event):
+        if self.character_drag is not None:
+            character = self.character_drag[0]
+            self.character_drag = None
+            self.setCursor(Qt.ArrowCursor)
+            self.character_workspace.move_character(character, np.zeros(3), commit=True)
+            return
         self.drag_point = None
         if self._camera_update_timer.isActive():
             self._camera_update_timer.stop()
@@ -429,6 +474,9 @@ class MotionView(ViewportBase):
             self._camera_update_timer.start(max(1, math.ceil(remaining * 1000)))
 
     def mouseMoveEvent(self, event):
+        if self.character_drag is not None:
+            self.drag_character(event.position())
+            return
         if self.drag_point is None:
             hovered = next((name for center, name in reversed(self._gizmo_hits)
                             if (event.position() - center).manhattanLength() <= 14), None)
@@ -956,6 +1004,8 @@ class MotionView(ViewportBase):
         painter.setFont(hint_font)
         painter.setPen(QColor("#999999"))
         hint = "LMB: Orbit  |  MMB / RMB: Pan  |  Wheel: Zoom  |  Double-click: Frame"
+        if self.character_workspace and self.character_workspace.selected_character() is not None:
+            hint += "  |  Ctrl+LMB: Move character  |  Ctrl+Shift+LMB: Turn"
         hint_width = max(0, self.width() - 30)
         hint = painter.fontMetrics().elidedText(hint, Qt.ElideRight, hint_width)
         painter.drawText(QRectF(15, self.height() - 43, hint_width, 17), Qt.AlignLeft | Qt.AlignVCenter, hint)

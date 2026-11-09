@@ -31,6 +31,18 @@ different source person. Check or uncheck its row to show or hide it; use
 **Remove Character** in its right-click menu to remove it from the project.
 Character data and assigned motion are saved inside the project.
 
+To place a character, select its row. Below the list, set a world **Offset XYZ**
+in meters (Y is height) and a **Yaw** in degrees. In the 3D view, hold **Ctrl** and
+left-drag to slide it along the floor, or **Ctrl+Shift** and drag sideways to turn it. Drag a value sideways to adjust it (hold
+**Shift** for finer steps), or click it to type. Yaw turns the character about the
+vertical axis through the point where its motion starts (a rest-pose character
+turns about its centre); positive values turn counterclockwise seen from above.
+The offset then moves that point. **Reset** returns the character to its retargeted
+position and direction. Placement is saved with the character, kept when you
+retarget or **Apply Correction**, and included in **Export Character...** and
+**Export Preview...**. It moves and turns the whole character; the motion itself
+is not changed.
+
 Characters are drawn in front of the SMPL source meshes, with **Bone Overlay**
 above both. **Name** shows the list name above each visible person or character,
 including characters still in their rest pose. Names stay upright and the same
@@ -608,12 +620,12 @@ an estimate and can leave residual sliding or penetration.
 | --- | --- |
 | **Find person** | For ExMR/FlowHMR/GVHMR, discover people for explicit selection. Without it, tracking selects one person and may switch identity during overlap. MAMMA/PromptHMR track people during reconstruction; this button is hidden. |
 | **People checkboxes / selected row** | Checked rows control visibility and ExMR/FlowHMR/GVHMR reconstruction targets. MAMMA/PromptHMR reconstruct their detected/requested people together. The selected row controls timeline and contact editing. |
-| **Character checkboxes / selected row** | Show or hide imported characters independently of source people. Select a character to export it; right-click it for Retarget, Export Character or Remove Character. |
+| **Character checkboxes / selected row** | Show or hide imported characters independently of source people. Select a character to export it or to set its Offset XYZ and Yaw (drag a value sideways, Shift for finer; Ctrl+drag in the 3D view moves it, Ctrl+Shift+drag turns it); right-click it for Retarget, Export Character or Remove Character. |
 | **People → ?** | Open instructions for people selection, names, colors and takes. The list footer shows only current status or warnings. |
 | **Rename... / color square** | Right-click a row to rename it; click its square to change display color. The name is also used for FBX filenames and rig names. |
 | **Take selector** | Choose a visible section when a person leaves and reappears. Long unseen gaps are separate takes. |
 | **Overlays / Bone Overlay** | Show video observations / source export bones. Bone Overlay is drawn above source meshes and imported characters. Display only. |
-| **View direction / Frame All** | Choose a camera direction / fit visible people in the 3D view. Left drag orbits, middle/right drag pans, wheel zooms. |
+| **View direction / Frame All** | Choose a camera direction / fit visible people in the 3D view. Left drag orbits, middle/right drag pans, wheel zooms; Ctrl+left drag moves the selected character and Ctrl+Shift+left drag turns it. |
 | **Floor Grid / Correction Floor** | Show the gray zero-height reference grid / orange correction floor preview. Neither applies correction. |
 | **Motion Path / Follow Actor** | Show the person's path / move the viewing camera with the person. |
 | **Lock** | Show active hand/foot contacts as translucent horizontal discs in timeline colors. Hand discs are at palm height, including raised supports. Display only. |
