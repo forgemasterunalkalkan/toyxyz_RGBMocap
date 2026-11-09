@@ -424,6 +424,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.setInterval(33)
         self.timer.timeout.connect(self.next_frame)
+        self.audio = None
         self.shortcuts = []
         for key, action in [("Space", self.toggle_play), ("Left", lambda: self.step_frames(-1)),
                             ("Right", lambda: self.step_frames(1)),
@@ -1006,9 +1007,31 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         self.presented_times.clear()
         if self.timer.isActive() and self.info:
             self.timer.start(max(1, math.ceil(1000 / (self.info['fps'] * self.play_speed.currentData()))))
+            self.sync_audio()
+
+    def sync_audio(self):
+        """Play the source video's sound from the current frame; the frame clock stays the master."""
+        if self._pear_active or not self.video_path:
+            return
+        if self.audio is None:
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            self.audio = QMediaPlayer(self)
+            self.audio.setAudioOutput(QAudioOutput(self.audio))
+            # A seek sent before the file has loaded is dropped, so the first one waits for it.
+            self.audio.mediaStatusChanged.connect(lambda status: status == QMediaPlayer.LoadedMedia
+                and self.audio.setPosition(self.audio_start))
+        source = QUrl.fromLocalFile(str(self.video_path))
+        if self.audio.source() != source:
+            self.audio.setSource(source)
+        self.audio.setPlaybackRate(self.play_speed.currentData())
+        self.audio_start = round((self.source_offset + self.slider.value() / self.info['fps']) * 1000)
+        self.audio.setPosition(self.audio_start)
+        self.audio.play()
 
     def stop_playback(self):
         self.timer.stop()
+        if self.audio is not None:
+            self.audio.pause()
         self.timer_resolution.release()
         self.set_playback_indicator(False)
         self.pear_playback_stopped()
@@ -1034,6 +1057,7 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
             self.timer_resolution.acquire()
             self.reset_play_clock()
             self.timer.start(max(1, math.ceil(1000 / (self.info['fps'] * self.play_speed.currentData()))))
+            self.sync_audio()
             self.set_playback_indicator(True)
 
     def next_frame(self):
@@ -1044,11 +1068,14 @@ class MainWindow(PreviewExportWorkspace,PearWorkspace,PromptHMRWorkspace,MammaWo
         target = self.slider.clip_in + playback_frame(self.play_anchor - self.slider.clip_in,
                                 elapsed, self.info["fps"], self.slider.clip_out - self.slider.clip_in,
                                 self.play_speed.currentData())
+        wrapped = target < self.slider.value()
         self.playback_tick = True
         try:
             self.slider.setValue(target)
         finally:
             self.playback_tick = False
+        if wrapped:
+            self.sync_audio()
         next_deadline = (math.floor(elapsed * rate + 1e-8) + 1) / rate
         remaining = next_deadline - self.play_clock.nsecsElapsed() / 1e9
         self.timer.start(max(1, math.ceil(remaining * 1000)))
